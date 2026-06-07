@@ -1,0 +1,8 @@
+debian/com.kylebenzle.gitmo.desktop usr/share/applications/
+debian/com.kylebenzle.gitmo.metainfo.xml usr/share/metainfo/
+icon.png usr/share/gitmo/
+logo.png usr/share/gitmo/
+logotrans.png usr/share/gitmo/
+logow.png usr/share/gitmo/
+gui.png usr/share/doc/gitmo/
+repogui.png usr/share/doc/gitmo/

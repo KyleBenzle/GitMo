@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gitmo"
+version = "0.1.2"
+description = "Automatic GitHub sync for local project folders."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+authors = [
+  { name = "Kyle Benzle", email = "kbe@gmx.us" }
+]
+dependencies = []
+classifiers = [
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Version Control :: Git",
+]
+
+[project.urls]
+Homepage = "https://github.com/KyleBenzle/GitMo"
+Repository = "https://github.com/KyleBenzle/GitMo"
+
+[project.scripts]
+gitmo = "gitmo.app:main"
+
+[tool.setuptools]
+packages = ["gitmo"]

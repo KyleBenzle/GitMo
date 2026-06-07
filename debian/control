@@ -1,0 +1,31 @@
+Source: gitmo
+Section: vcs
+Priority: optional
+Maintainer: Kyle Benzle <kbe@gmx.us>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ pybuild-plugin-pyproject,
+ python3-all,
+ python3-setuptools
+Standards-Version: 4.7.4
+Rules-Requires-Root: no
+Homepage: https://github.com/KyleBenzle/GitMo
+Vcs-Browser: https://github.com/KyleBenzle/GitMo
+Vcs-Git: https://github.com/KyleBenzle/GitMo.git
+
+Package: gitmo
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ${python3:Depends},
+ git,
+ gir1.2-ayatanaappindicator3-0.1,
+ gir1.2-gtk-3.0,
+ libnotify-bin,
+ python3-gi,
+ python3-tk,
+ xdg-utils
+Description: Automatic GitHub sync for local project folders
+ GitMo is a Linux desktop app for keeping selected local folders synced
+ to GitHub repositories with automatic commits and pushes.

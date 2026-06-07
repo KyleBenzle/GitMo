@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=GitMo
+Comment=Sync GitMo folders with GitHub
+Exec=/home/lll/MEGA/GitMo/run-gitmo.sh
+Icon=/home/lll/MEGA/GitMo/icon.png
+Terminal=false
+Categories=Development;RevisionControl;
+StartupNotify=true

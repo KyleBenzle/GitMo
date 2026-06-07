@@ -1,0 +1,9 @@
+gitmo (0.1.2-1) unstable; urgency=medium
+
+  * Initial release. (Closes: #1138600)
+  * Add per-repository automatic sync schedules and commit message styles.
+  * Sort managed repositories by GitHub and local-folder availability.
+  * Restore the application through supported tray icon activation behavior.
+  * Improve packaged asset lookup and settings management.
+
+ -- Kyle Benzle <kbe@gmx.us>  Sun, 07 Jun 2026 00:00:00 -0400
