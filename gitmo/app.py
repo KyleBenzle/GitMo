@@ -2066,7 +2066,7 @@ class GitMoApp:
                 refresh_tree_row(selection.name)
             update_delete_buttons()
 
-        columns = ("delete", "name", "github", "local")
+        columns = ("delete", "name", "github", "local", "location")
         tree = ttk.Treeview(
             table_body,
             columns=columns,
@@ -2077,11 +2077,13 @@ class GitMoApp:
         tree.heading("delete", text="Delete")
         tree.heading("name", text="Name")
         tree.heading("github", text="GitHub")
-        tree.heading("local", text="Local Folder / Location")
+        tree.heading("local", text="Local")
+        tree.heading("location", text="Folder Location")
         tree.column("delete", width=70, minwidth=60, anchor="center", stretch=False)
         tree.column("name", width=260, minwidth=160, anchor="w")
         tree.column("github", width=110, minwidth=90, anchor="center", stretch=False)
-        tree.column("local", width=390, minwidth=230, anchor="w")
+        tree.column("local", width=100, minwidth=80, anchor="center", stretch=False)
+        tree.column("location", width=300, minwidth=200, anchor="w")
         tree_scroll = ttk.Scrollbar(table_body, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=tree_scroll.set)
         tree.pack(side="left", fill="both", expand=True)
@@ -2089,18 +2091,16 @@ class GitMoApp:
 
         selections_by_name = {selection.name: selection for selection in self.repo_catalog}
 
-        def tree_values(repo_name: str) -> tuple[str, str, str, str]:
+        def tree_values(repo_name: str) -> tuple[str, str, str, str, str]:
             row = self.repo_rows[repo_name]
             local_path = Path(str(row["local_path"].get())).expanduser()
             local_enabled = bool(row["local"].get())
-            local_text = "✕"
-            if local_enabled:
-                local_text = f"✓  {self._shorten_folder_parent(local_path)}"
             return (
                 "☑" if bool(row["selected"].get()) else "☐",
                 repo_name,
                 "✓" if bool(row["github"].get()) else "✕",
-                local_text,
+                "✓" if local_enabled else "✕",
+                self._shorten_folder_parent(local_path) if local_enabled else "",
             )
 
         def refresh_tree_row(repo_name: str) -> None:
@@ -2141,7 +2141,7 @@ class GitMoApp:
             repo_name = tree.identify_row(event.y)
             if (
                 not repo_name
-                or tree.identify_column(event.x) != "#4"
+                or tree.identify_column(event.x) != "#5"
                 or repo_name not in self.repo_rows
             ):
                 return None
