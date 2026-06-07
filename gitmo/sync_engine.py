@@ -93,7 +93,9 @@ class SyncEngine:
             self._stop_event.wait(POLL_INTERVAL_SECONDS)
 
     def run_once(self, *, force_autosave: bool = False) -> None:
-        for repo_name, repo_config in self.config.repos.items():
+        for repo_name, repo_config in list(self.config.repos.items()):
+            if self._stop_event.is_set():
+                break
             if not repo_config.enabled:
                 continue
             repo_path = self.repo_path_for(repo_name, repo_config)

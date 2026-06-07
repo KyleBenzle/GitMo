@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import queue
+import re
 import shutil
 import threading
 import time
@@ -19,6 +20,7 @@ from gitmo.config import (
     LEGACY_CONFIG_PATH,
     LOG_PATH,
     AppConfig,
+    CachedGitHubRepo,
     RepoConfig,
     load_config,
     save_config,
@@ -96,6 +98,24 @@ class RepoSelection:
     clone_url: str | None = None
 
 
+class LocalValue:
+    def __init__(self, value) -> None:
+        self.value = value
+        self.callbacks: list = []
+
+    def get(self):
+        return self.value
+
+    def set(self, value) -> None:
+        self.value = value
+        for callback in tuple(self.callbacks):
+            callback()
+
+    def trace_add(self, _mode: str, callback):
+        self.callbacks.append(callback)
+        return callback
+
+
 def repo_catalog_sort_key(selection: RepoSelection) -> tuple[int, str, str]:
     if selection.exists_remote and selection.exists_local:
         group = 0
@@ -106,6 +126,94 @@ def repo_catalog_sort_key(selection: RepoSelection) -> tuple[int, str, str]:
     else:
         group = 3
     return group, selection.name.casefold(), selection.name
+
+
+def repo_targets_changed(
+    selection: RepoSelection,
+    *,
+    wants_github: bool,
+    wants_local: bool,
+) -> bool:
+    return (
+        wants_github != selection.exists_remote
+        or wants_local != selection.exists_local
+    )
+
+
+def repo_settings_state(
+    *,
+    github: bool,
+    local: bool,
+    enabled: bool,
+    sync_mode: str,
+    sync_schedule: str,
+    commit_message_mode: str,
+    local_path: str,
+) -> tuple[bool, bool, bool, str, str, str, str]:
+    return (
+        github,
+        local,
+        enabled,
+        sync_mode,
+        sync_schedule,
+        commit_message_mode,
+        local_path,
+    )
+
+
+def repo_description(repo_path: Path, repo_name: str) -> str:
+    if repo_path.is_dir():
+        readmes = sorted(
+            (
+                path
+                for path in repo_path.iterdir()
+                if path.is_file() and path.name.casefold().startswith("readme")
+            ),
+            key=lambda path: (path.name.casefold() != "readme.md", path.name.casefold()),
+        )
+        for readme in readmes:
+            try:
+                description = _first_readme_sentence(readme.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError):
+                continue
+            if description:
+                return description[:350].rstrip()
+
+    title = repo_name.replace("-", " ").replace("_", " ").strip() or repo_name
+    return f"Project files for {title}."[:350]
+
+
+def _first_readme_sentence(text: str) -> str:
+    paragraph: list[str] = []
+    in_code_fence = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith(("```", "~~~")):
+            in_code_fence = not in_code_fence
+            continue
+        if in_code_fence:
+            continue
+        if not line:
+            if paragraph:
+                break
+            continue
+        if (
+            line.startswith(("#", "!", "<", ">", "-", "*", "+"))
+            or re.match(r"^\d+[.)]\s", line)
+            or "|" in line
+        ):
+            continue
+        paragraph.append(line)
+
+    prose = " ".join(paragraph)
+    prose = re.sub(r"!\[[^\]]*]\([^)]*\)", "", prose)
+    prose = re.sub(r"\[([^\]]+)]\([^)]*\)", r"\1", prose)
+    prose = re.sub(r"[`*_~]+", "", prose)
+    prose = re.sub(r"\s+", " ", prose).strip()
+    if not prose:
+        return ""
+    sentence = re.split(r"(?<=[.!?])\s+", prose, maxsplit=1)[0]
+    return sentence.strip()
 
 
 class TrayMenuActivationTracker:
@@ -512,7 +620,7 @@ class GitMoApp:
         self.root.configure(bg=THEME["bg"])
         self.config = load_config()
         self.github_client: GitHubClient | None = None
-        self.remote_repos: dict[str, GitHubRepo] = {}
+        self.remote_repos = self._cached_remote_repos()
         self.remote_repos_loaded = False
         self.remote_repos_loading = False
         self.remote_repos_error = ""
@@ -556,13 +664,16 @@ class GitMoApp:
         self.content.bind("<Configure>", self._update_content_scroll_region)
         self.content_canvas.bind("<Configure>", self._resize_content_window)
         self._bind_outer_mousewheel()
-        self.repo_rows: dict[str, dict[str, tk.Variable]] = {}
+        self.repo_rows: dict[str, dict[str, LocalValue]] = {}
+        self.repo_manager_status_var: tk.StringVar | None = None
+        self.repo_manager_status_label: tk.Widget | None = None
         self.status_vars: dict[str, tk.StringVar] = {}
         self.status_labels: dict[str, tk.Label] = {}
         self.last_sync_vars: dict[str, tk.StringVar] = {}
         self.header_last_sync_var = tk.StringVar(value="Last Sync: Not yet")
         self.header_git_var = tk.StringVar(value="Git: OK")
         self.last_checked_var = tk.StringVar(value="")
+        self.status_refresh_after_id: str | None = None
         self.log_text: tk.Text | None = None
         self.fixed_action_bar: tk.Frame | None = None
         self.current_screen = ""
@@ -873,13 +984,16 @@ class GitMoApp:
         self.root.bind_all("<Control-minus>", lambda _event: self._decrease_text_size())
 
     def _clear(self) -> None:
-        self.sync_engine.stop()
+        if self.status_refresh_after_id is not None:
+            self.root.after_cancel(self.status_refresh_after_id)
+            self.status_refresh_after_id = None
         self._bind_outer_mousewheel()
         if self.fixed_action_bar is not None:
             self.fixed_action_bar.destroy()
             self.fixed_action_bar = None
         for child in self.content.winfo_children():
             child.destroy()
+        self.log_text = None
         self.content_canvas.yview_moveto(0)
 
     def _fixed_bottom_bar(self) -> tk.Frame:
@@ -903,11 +1017,9 @@ class GitMoApp:
         self.content_canvas.configure(scrollregion=self.content_canvas.bbox("all"))
 
     def _resize_content_window(self, event) -> None:
-        self.content.update_idletasks()
         self.content_canvas.itemconfigure(
             self.content_window,
             width=event.width,
-            height=max(event.height, self.content.winfo_reqheight()),
         )
         self._update_content_scroll_region()
 
@@ -1225,10 +1337,13 @@ class GitMoApp:
         )
 
     def _app_command(self) -> str:
+        source_launcher = BASE_DIR / "run-gitmo.sh"
+        if source_launcher.exists():
+            return str(source_launcher)
         installed_command = shutil.which("gitmo")
         if installed_command:
             return installed_command
-        return str(BASE_DIR / "run-gitmo.sh")
+        return "gitmo"
 
     def _icon_value(self) -> str:
         if ASSET_DIR == SYSTEM_ASSET_DIR:
@@ -1289,6 +1404,49 @@ class GitMoApp:
             self.github_client = GitHubClient(self.config.github_token)
         return self.github_client
 
+    def _cached_remote_repos(self) -> dict[str, GitHubRepo]:
+        if (
+            not self.config.github_login
+            or self.config.cached_github_login != self.config.github_login
+        ):
+            return {}
+        return {
+            name: GitHubRepo(
+                name=repo.name,
+                clone_url=repo.clone_url,
+                private=repo.private,
+                default_branch=repo.default_branch,
+            )
+            for name, repo in self.config.cached_github_repos.items()
+        }
+
+    def _save_remote_repo_cache(self) -> None:
+        self.config.cached_github_login = self.config.github_login
+        self.config.cached_github_repos = {
+            name: CachedGitHubRepo(
+                name=repo.name,
+                clone_url=repo.clone_url,
+                private=repo.private,
+                default_branch=repo.default_branch,
+            )
+            for name, repo in self.remote_repos.items()
+        }
+        save_config(self.config)
+
+    @staticmethod
+    def _remote_repo_signature(repos: dict[str, GitHubRepo]) -> tuple:
+        return tuple(
+            sorted(
+                (
+                    name,
+                    repo.clone_url,
+                    repo.private,
+                    repo.default_branch,
+                )
+                for name, repo in repos.items()
+            )
+        )
+
     def _start_remote_repo_load(self, *, refresh_repos_screen: bool = False) -> None:
         # GitHub API calls can be slow. Load repos in the background so startup
         # and Manage Repos can paint immediately from local/cached state.
@@ -1334,11 +1492,34 @@ class GitMoApp:
         self.refresh_repos_screen_after_load = False
         if error:
             self._enqueue_log("github", error)
+            if self.current_screen == "repos" and self.repo_manager_status_var is not None:
+                self.repo_manager_status_var.set(
+                    "Could not refresh GitHub repos. Showing the saved list."
+                )
         else:
-            self.remote_repos = {repo.name: repo for repo in remote_repos}
+            updated_repos = {repo.name: repo for repo in remote_repos}
+            catalog_changed = self._remote_repo_signature(
+                self.remote_repos
+            ) != self._remote_repo_signature(updated_repos)
+            self.remote_repos = updated_repos
             self.remote_repos_loaded = True
+            self._save_remote_repo_cache()
             self._enqueue_log("github", f"Loaded {len(remote_repos)} GitHub repo(s).")
-        if should_refresh_repos_screen and self.current_screen == "repos":
+            if self.current_screen == "repos" and self.repo_manager_status_var is not None:
+                self.repo_manager_status_var.set("")
+            if (
+                self.current_screen == "repos"
+                and self.repo_manager_status_label is not None
+                and self.repo_manager_status_label.winfo_exists()
+            ):
+                self.repo_manager_status_label.destroy()
+                self.repo_manager_status_label = None
+        if (
+            should_refresh_repos_screen
+            and self.current_screen == "repos"
+            and not error
+            and catalog_changed
+        ):
             self.show_repo_selection_screen()
 
     def _choose_folder(self, *, title: str, initial_path: Path, must_exist: bool) -> Path | None:
@@ -1429,13 +1610,16 @@ class GitMoApp:
                 if self.config.github_login
                 else "gitmo@users.noreply.github.com"
             )
+            if self.config.cached_github_login != self.config.github_login:
+                self.config.cached_github_login = ""
+                self.config.cached_github_repos = {}
             save_config(self.config)
             self._enqueue_log("app", f"Authenticated as {self.config.github_login or 'unknown'}.")
             self.remote_repos_loaded = False
             self.remote_repos_loading = False
             self.remote_repos_error = ""
             self.refresh_repos_screen_after_load = False
-            self.remote_repos = {}
+            self.remote_repos = self._cached_remote_repos()
             self._start_remote_repo_load()
             self.show_gitmo_screen()
 
@@ -1508,19 +1692,25 @@ class GitMoApp:
         status_var = tk.StringVar(value="")
         status_label = ttk.Label(self.content, textvariable=status_var, style="Subtitle.TLabel")
         status_label.pack(anchor="w", pady=(0, 4))
-        self.root.update_idletasks()
+        self.repo_manager_status_var = status_var
+        self.repo_manager_status_label = status_label
 
         self._ensure_github_client()
         if not self.remote_repos_loaded:
             if self.remote_repos_error:
                 status_var.set("Could not load GitHub repos. Showing local and cached repos.")
             else:
-                status_var.set("Loading GitHub repos in the background...")
+                status_var.set(
+                    "Showing saved repositories while GitHub refreshes in the background..."
+                    if self.remote_repos
+                    else "Loading GitHub repos in the background..."
+                )
                 self._start_remote_repo_load(refresh_repos_screen=True)
         self.repo_catalog = self._build_repo_catalog(list(self.remote_repos.values()))
 
         if not status_var.get():
             status_label.destroy()
+            self.repo_manager_status_label = None
         self.repo_rows = {}
         search_var = tk.StringVar()
         saved_modes = [
@@ -1539,19 +1729,62 @@ class GitMoApp:
                 default_enabled = False
 
             self.repo_rows[selection.name] = {
-                "selected": tk.BooleanVar(value=False),
-                "enabled": tk.BooleanVar(value=default_enabled),
-                "github": tk.BooleanVar(value=selection.exists_remote or default_enabled),
-                "local": tk.BooleanVar(value=selection.exists_local or default_enabled),
-                "sync_mode": tk.StringVar(value=saved_config.sync_mode if saved_config else default_sync_mode),
-                "sync_schedule": tk.StringVar(
-                    value=saved_config.sync_schedule if saved_config else "idle-1m"
+                "selected": LocalValue(False),
+                "enabled": LocalValue(default_enabled),
+                "github": LocalValue(selection.exists_remote or default_enabled),
+                "local": LocalValue(selection.exists_local or default_enabled),
+                "sync_mode": LocalValue(saved_config.sync_mode if saved_config else default_sync_mode),
+                "sync_schedule": LocalValue(
+                    saved_config.sync_schedule if saved_config else "idle-1m"
                 ),
-                "commit_message_mode": tk.StringVar(
-                    value=saved_config.commit_message_mode if saved_config else "summary"
+                "commit_message_mode": LocalValue(
+                    saved_config.commit_message_mode if saved_config else "summary"
                 ),
-                "local_path": tk.StringVar(value=str(selection.local_path)),
+                "local_path": LocalValue(str(selection.local_path)),
             }
+
+        def current_repo_settings(repo_name: str) -> tuple[bool, bool, bool, str, str, str, str]:
+            row = self.repo_rows[repo_name]
+            return repo_settings_state(
+                github=bool(row["github"].get()),
+                local=bool(row["local"].get()),
+                enabled=bool(row["enabled"].get()),
+                sync_mode=str(row["sync_mode"].get()),
+                sync_schedule=str(row["sync_schedule"].get()),
+                commit_message_mode=str(row["commit_message_mode"].get()),
+                local_path=str(row["local_path"].get()),
+            )
+
+        initial_repo_settings = {
+            selection.name: current_repo_settings(selection.name)
+            for selection in self.repo_catalog
+        }
+        for selection in self.repo_catalog:
+            if selection.name not in self.pending_added_folder_names:
+                continue
+            current = initial_repo_settings[selection.name]
+            initial_repo_settings[selection.name] = repo_settings_state(
+                github=selection.exists_remote,
+                local=selection.exists_local,
+                enabled=False,
+                sync_mode=current[3],
+                sync_schedule=current[4],
+                commit_message_mode=current[5],
+                local_path=current[6],
+            )
+
+        apply_button: RoundedButton | None = None
+
+        def has_pending_repo_settings() -> bool:
+            return any(
+                current_repo_settings(repo_name) != initial_state
+                for repo_name, initial_state in initial_repo_settings.items()
+                if repo_name in self.repo_rows
+            )
+
+        def update_apply_button(*_args) -> None:
+            if apply_button is not None:
+                apply_button.set_enabled(has_pending_repo_settings())
 
         search_card = self._card(self.content, padding=10)
         search_card.pack(anchor="w", pady=(0, 10))
@@ -1588,64 +1821,14 @@ class GitMoApp:
             variable=tk.BooleanVar(value=False),
             style="Card.TCheckbutton",
         ).pack(side="right")
-        table_body = self._scrollable_area(table_shell)
+        table_body = tk.Frame(table_shell, bg=THEME["card"])
+        table_body.pack(fill="both", expand=True)
 
-        column_widths = (7, 28, 12, 36)
-
-        def configure_repo_table_columns(frame: tk.Frame) -> None:
-            for column, width in enumerate(column_widths):
-                frame.grid_columnconfigure(column, minsize=width * 9)
-            frame.grid_columnconfigure(1, weight=1)
-
-        def toggle_target(row: dict[str, tk.Variable], key: str) -> None:
+        def toggle_target(row: dict[str, LocalValue], key: str) -> None:
             row[key].set(not bool(row[key].get()))
             row["enabled"].set(bool(row["github"].get()) and bool(row["local"].get()))
 
-        toggle_padding = {
-            "github": (42, 0),
-            "local": (0, 214),
-        }
-
-        def draw_toggle(parent: tk.Frame, row_vars: dict[str, tk.Variable], key: str) -> None:
-            parent.grid_columnconfigure(0, weight=1)
-            enabled = bool(row_vars[key].get())
-            label = tk.Label(
-                parent,
-                text="✓" if enabled else "✕",
-                bg=THEME["card"],
-                fg=THEME["success"] if enabled else THEME["danger"],
-                font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta + 3, "bold"),
-                anchor="center",
-                cursor="hand2",
-                padx=0,
-                pady=2,
-            )
-            label.grid(row=0, column=0, sticky="ew", padx=toggle_padding[key])
-            label.bind("<Button-1>", lambda _event: (toggle_target(row_vars, key), render_table()))
-
-        def draw_local_folder_cell(parent: tk.Frame, selection: RepoSelection, row_vars: dict[str, tk.Variable]) -> None:
-            parent.grid_columnconfigure(0, weight=1)
-            draw_toggle(parent, row_vars, "local")
-            if not bool(row_vars["local"].get()):
-                return
-            local_path = Path(str(row_vars["local_path"].get())).expanduser()
-            exists = local_path.exists()
-            path_label = tk.Label(
-                parent,
-                text=self._shorten_folder_parent(local_path),
-                bg=THEME["card"],
-                fg=THEME["muted"],
-                anchor="w",
-                padx=4,
-                pady=0,
-                font=(FONT_FAMILY, max(8, BASE_BODY_SIZE + self.config.font_size_delta - 2), "underline" if exists else "normal"),
-                cursor="hand2" if exists else "arrow",
-            )
-            path_label.place(relx=0.31, rely=0.5, anchor="w")
-            if exists:
-                path_label.bind("<Button-1>", lambda _event, path=local_path: self._open_local_path(path))
-
-        def is_outside_local_folder(selection: RepoSelection, row_vars: dict[str, tk.Variable]) -> bool:
+        def is_outside_local_folder(selection: RepoSelection, row_vars: dict[str, LocalValue]) -> bool:
             local_path = Path(str(row_vars["local_path"].get())).expanduser()
             return not self._is_inside_gitmo_folder(local_path)
 
@@ -1692,7 +1875,7 @@ class GitMoApp:
                 self.repo_rows[selection.name]["local"].set(False)
                 self.repo_rows[selection.name]["local_path"].set(str(fallback_path))
             dialog.destroy()
-            render_table()
+            populate_tree()
             update_delete_buttons()
 
         def open_repo_options(selection: RepoSelection) -> None:
@@ -1846,6 +2029,7 @@ class GitMoApp:
                     row_vars["commit_message_mode"].set(
                         COMMIT_MESSAGE_OPTIONS[commit_message_var.get()]
                     )
+                update_apply_button()
                 dialog.destroy()
 
             self._button(actions, "Cancel", dialog.destroy, width=104, canvas_bg=THEME["bg"]).pack(side="right")
@@ -1866,107 +2050,6 @@ class GitMoApp:
             dialog.focus_force()
             dialog.grab_set()
 
-        def draw_table_header(parent: tk.Frame) -> None:
-            header = tk.Frame(parent, bg=THEME["panel_alt"])
-            header.pack(fill="x")
-            configure_repo_table_columns(header)
-            titles = ("Delete", "Name", "GitHub", "Local Folder")
-            for column, (title, width) in enumerate(zip(titles, column_widths)):
-                font_size = max(8, BASE_BODY_SIZE + self.config.font_size_delta - 2) if column == 0 else BASE_BODY_SIZE + self.config.font_size_delta
-                if column == 2:
-                    header_cell = tk.Frame(header, bg=THEME["panel_alt"])
-                    header_cell.grid(row=0, column=column, sticky="ew")
-                    tk.Label(
-                        header_cell,
-                        text="",
-                        bg=THEME["panel_alt"],
-                        font=(FONT_FAMILY, font_size, "bold"),
-                        pady=7,
-                        width=width,
-                    ).grid(row=0, column=0, sticky="ew")
-                    tk.Label(
-                        header_cell,
-                        text=title,
-                        bg=THEME["panel_alt"],
-                        fg=THEME["muted"],
-                        font=(FONT_FAMILY, font_size, "bold"),
-                    ).place(relx=0.69, rely=0.5, anchor="center")
-                    continue
-                if column == 3:
-                    header_cell = tk.Frame(header, bg=THEME["panel_alt"])
-                    header_cell.grid(row=0, column=column, sticky="ew")
-                    tk.Label(
-                        header_cell,
-                        text="",
-                        bg=THEME["panel_alt"],
-                        font=(FONT_FAMILY, font_size, "bold"),
-                        pady=7,
-                        width=width,
-                    ).grid(row=0, column=0, sticky="ew")
-                    tk.Label(
-                        header_cell,
-                        text=title,
-                        bg=THEME["panel_alt"],
-                        fg=THEME["muted"],
-                        font=(FONT_FAMILY, font_size, "bold"),
-                    ).place(relx=0.17, rely=0.5, anchor="center")
-                    tk.Label(
-                        header_cell,
-                        text="Folder location",
-                        bg=THEME["panel_alt"],
-                        fg="#8c959f",
-                        font=(FONT_FAMILY, max(8, font_size - 2)),
-                    ).place(relx=0.32, rely=0.5, anchor="w")
-                    continue
-                anchor = "center" if column == 0 else "w"
-                label_padx = 8
-                grid_padx = 0
-                tk.Label(
-                    header,
-                    text=title,
-                    bg=THEME["panel_alt"],
-                    fg=THEME["muted"],
-                    font=(FONT_FAMILY, font_size, "bold"),
-                    anchor=anchor,
-                    padx=label_padx,
-                    pady=7,
-                    width=width,
-                ).grid(row=0, column=column, sticky="ew", padx=grid_padx)
-            header.grid_columnconfigure(1, weight=1)
-
-        def draw_row(parent: tk.Frame, selection: RepoSelection) -> None:
-            row_vars = self.repo_rows[selection.name]
-            row = tk.Frame(parent, bg=THEME["card"], pady=4)
-            row.pack(fill="x")
-            configure_repo_table_columns(row)
-            ttk.Checkbutton(
-                row,
-                variable=row_vars["selected"],
-                style="Card.TCheckbutton",
-            ).grid(row=0, column=0, sticky="ew", padx=(8, 8), pady=5)
-            name_label = tk.Label(
-                row,
-                text=selection.name,
-                bg=THEME["card"],
-                fg=THEME["accent"],
-                anchor="w",
-                padx=8,
-                pady=5,
-                font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta, "bold underline"),
-                width=column_widths[1],
-                cursor="hand2",
-            )
-            name_label.grid(row=0, column=1, sticky="ew")
-            name_label.bind("<Button-1>", lambda _event, item=selection: open_repo_options(item))
-            github_cell = tk.Frame(row, bg=THEME["card"])
-            github_cell.grid(row=0, column=2, sticky="ew")
-            github_cell.grid_columnconfigure(0, weight=1)
-            draw_toggle(github_cell, row_vars, "github")
-            local_cell = tk.Frame(row, bg=THEME["card"])
-            local_cell.grid(row=0, column=3, sticky="ew")
-            local_cell.grid_columnconfigure(0, weight=1)
-            draw_local_folder_cell(local_cell, selection, row_vars)
-
         def visible_items() -> list[RepoSelection]:
             query = search_var.get().strip().lower()
             return [
@@ -1980,21 +2063,116 @@ class GitMoApp:
             checked = not all(bool(self.repo_rows[selection.name]["selected"].get()) for selection in visible)
             for selection in visible_items():
                 self.repo_rows[selection.name]["selected"].set(checked)
+                refresh_tree_row(selection.name)
             update_delete_buttons()
 
-        def render_table(*_args) -> None:
-            for child in table_body.winfo_children():
-                child.destroy()
-            visible = visible_items()
-            if not visible:
-                self._card_label(table_body, "No matching repositories or folders.", muted=True, fill="x", pady=10)
-            else:
-                draw_table_header(table_body)
-            for selection in visible:
-                draw_row(table_body, selection)
+        columns = ("delete", "name", "github", "local")
+        tree = ttk.Treeview(
+            table_body,
+            columns=columns,
+            show="headings",
+            selectmode="none",
+            height=min(18, max(6, len(self.repo_catalog))),
+        )
+        tree.heading("delete", text="Delete")
+        tree.heading("name", text="Name")
+        tree.heading("github", text="GitHub")
+        tree.heading("local", text="Local Folder / Location")
+        tree.column("delete", width=70, minwidth=60, anchor="center", stretch=False)
+        tree.column("name", width=260, minwidth=160, anchor="w")
+        tree.column("github", width=110, minwidth=90, anchor="center", stretch=False)
+        tree.column("local", width=390, minwidth=230, anchor="w")
+        tree_scroll = ttk.Scrollbar(table_body, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=tree_scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
 
-        search_var.trace_add("write", render_table)
-        render_table()
+        selections_by_name = {selection.name: selection for selection in self.repo_catalog}
+
+        def tree_values(repo_name: str) -> tuple[str, str, str, str]:
+            row = self.repo_rows[repo_name]
+            local_path = Path(str(row["local_path"].get())).expanduser()
+            local_enabled = bool(row["local"].get())
+            local_text = "✕"
+            if local_enabled:
+                local_text = f"✓  {self._shorten_folder_parent(local_path)}"
+            return (
+                "☑" if bool(row["selected"].get()) else "☐",
+                repo_name,
+                "✓" if bool(row["github"].get()) else "✕",
+                local_text,
+            )
+
+        def refresh_tree_row(repo_name: str) -> None:
+            if tree.exists(repo_name):
+                tree.item(repo_name, values=tree_values(repo_name))
+
+        def populate_tree() -> None:
+            tree.delete(*tree.get_children())
+            for selection in visible_items():
+                tree.insert(
+                    "",
+                    "end",
+                    iid=selection.name,
+                    values=tree_values(selection.name),
+                )
+
+        def on_tree_click(event) -> str | None:
+            repo_name = tree.identify_row(event.y)
+            column = tree.identify_column(event.x)
+            if not repo_name or repo_name not in self.repo_rows:
+                return None
+            row = self.repo_rows[repo_name]
+            if column == "#1":
+                row["selected"].set(not bool(row["selected"].get()))
+            elif column == "#2":
+                open_repo_options(selections_by_name[repo_name])
+                return "break"
+            elif column == "#3":
+                toggle_target(row, "github")
+            elif column == "#4":
+                toggle_target(row, "local")
+            else:
+                return None
+            refresh_tree_row(repo_name)
+            return "break"
+
+        def on_tree_double_click(event) -> str | None:
+            repo_name = tree.identify_row(event.y)
+            if (
+                not repo_name
+                or tree.identify_column(event.x) != "#4"
+                or repo_name not in self.repo_rows
+            ):
+                return None
+            row = self.repo_rows[repo_name]
+            local_path = Path(str(row["local_path"].get())).expanduser()
+            if bool(row["local"].get()) and local_path.exists():
+                self._open_local_path(local_path)
+                return "break"
+            return None
+
+        tree.bind("<Button-1>", on_tree_click)
+        tree.bind("<Double-1>", on_tree_double_click)
+        search_after_id: str | None = None
+
+        def apply_filter() -> None:
+            populate_tree()
+
+        def schedule_filter(*_args) -> None:
+            nonlocal search_after_id
+            if search_after_id is not None:
+                self.root.after_cancel(search_after_id)
+
+            def run_scheduled_filter() -> None:
+                nonlocal search_after_id
+                search_after_id = None
+                apply_filter()
+
+            search_after_id = self.root.after(180, run_scheduled_filter)
+
+        search_var.trace_add("write", schedule_filter)
+        populate_tree()
 
         tk.Frame(self.content, bg=THEME["bg"], height=48).pack(fill="x")
         bottom = self._fixed_bottom_bar()
@@ -2023,14 +2201,15 @@ class GitMoApp:
             width=166,
             canvas_bg=THEME["card"],
         ).pack(side="left", padx=(8, 0))
-        self._button(
+        apply_button = self._button(
             bottom,
             "Apply Selection",
             self._apply_repo_selection,
             variant="primary",
             width=150,
             canvas_bg=THEME["card"],
-        ).pack(side="right")
+        )
+        apply_button.pack(side="right")
         self._button(bottom, "Cancel", self.show_dashboard, width=104, canvas_bg=THEME["card"]).pack(side="right", padx=(0, 8))
 
         def update_delete_buttons(*_args) -> None:
@@ -2040,7 +2219,18 @@ class GitMoApp:
 
         for row in self.repo_rows.values():
             row["selected"].trace_add("write", update_delete_buttons)
+            for key in (
+                "github",
+                "local",
+                "enabled",
+                "sync_mode",
+                "sync_schedule",
+                "commit_message_mode",
+                "local_path",
+            ):
+                row[key].trace_add("write", update_apply_button)
         update_delete_buttons()
+        update_apply_button()
 
     def show_dashboard(self) -> None:
         self.current_screen = "dashboard"
@@ -2254,10 +2444,9 @@ class GitMoApp:
             anchor="e",
         ).pack(side="right")
 
-        self.sync_engine = SyncEngine(self.config, self._enqueue_log)
         if self.sync_should_run:
-            self.root.after(500, self._start_sync_engine_if_current)
-        self.root.after(1000, self._refresh_statuses)
+            self._ensure_sync_engine_running()
+        self._schedule_status_refresh(1000)
 
     def _start_sync_engine_if_current(self) -> None:
         if self.current_screen == "dashboard" and self.sync_should_run:
@@ -2552,6 +2741,7 @@ class GitMoApp:
             messagebox.showerror("GitMo", str(exc))
             return
 
+        self._save_remote_repo_cache()
         self._save_repo_rows_to_config()
         self._enqueue_log("app", f"Deleted {deleted} GitHub repo(s).")
         self.show_repo_selection_screen()
@@ -2603,10 +2793,10 @@ class GitMoApp:
         self.config.repos = updated_repos
         save_config(self.config)
 
-    def _row_sync_enabled(self, row: dict[str, tk.Variable]) -> bool:
+    def _row_sync_enabled(self, row: dict[str, LocalValue]) -> bool:
         return bool(row["enabled"].get())
 
-    def _row_has_no_targets(self, row: dict[str, tk.Variable]) -> bool:
+    def _row_has_no_targets(self, row: dict[str, LocalValue]) -> bool:
         return not bool(row["github"].get()) and not bool(row["local"].get())
 
     def _confirm_apply_destructive_actions(
@@ -2649,6 +2839,7 @@ class GitMoApp:
         assert self.github_client is not None
         self.github_client.delete_repo(self.config.github_login, selection.name)
         self.remote_repos.pop(selection.name, None)
+        self._save_remote_repo_cache()
         self._enqueue_log(selection.name, "Deleted GitHub repo during Apply Selection.")
 
     def _delete_local_for_apply(self, selection: RepoSelection) -> None:
@@ -2699,6 +2890,11 @@ class GitMoApp:
                 enabled = bool(row["enabled"].get())
                 sync_mode = str(row["sync_mode"].get())
                 repo_path = Path(str(row["local_path"].get())).expanduser()
+                targets_changed = repo_targets_changed(
+                    selection,
+                    wants_github=wants_github,
+                    wants_local=wants_local,
+                )
 
                 if not self._row_has_no_targets(row):
                     updated_repos[selection.name] = RepoConfig(
@@ -2709,7 +2905,7 @@ class GitMoApp:
                         sync_schedule=str(row["sync_schedule"].get()),
                         commit_message_mode=str(row["commit_message_mode"].get()),
                     )
-                if not selected and not enabled:
+                if not targets_changed:
                     continue
 
                 if selected and selection.exists_remote and not wants_github:
@@ -2722,8 +2918,12 @@ class GitMoApp:
                 remote_repo = self.remote_repos.get(selection.name)
                 if wants_github and not wants_local:
                     if not selection.exists_remote:
-                        remote_repo = self.github_client.create_repo(selection.name)
+                        remote_repo = self.github_client.create_repo(
+                            selection.name,
+                            description=repo_description(repo_path, selection.name),
+                        )
                         self.remote_repos[selection.name] = remote_repo
+                        self._save_remote_repo_cache()
                         self._enqueue_log(selection.name, "Created GitHub repo.")
                     continue
 
@@ -2740,8 +2940,12 @@ class GitMoApp:
                     continue
 
                 if selection.exists_local and not selection.exists_remote:
-                    remote_repo = self.github_client.create_repo(selection.name)
+                    remote_repo = self.github_client.create_repo(
+                        selection.name,
+                        description=repo_description(repo_path, selection.name),
+                    )
                     self.remote_repos[selection.name] = remote_repo
+                    self._save_remote_repo_cache()
                     self._connect_local_repo_to_remote(repo_path, remote_repo)
                     self._enqueue_log(
                         selection.name,
@@ -2936,10 +3140,12 @@ class GitMoApp:
         )
 
     def _refresh_statuses(self) -> None:
+        self.status_refresh_after_id = None
+        if self.current_screen != "dashboard":
+            return
         if self.is_paused:
             self.last_checked_var.set(f"Last checked {datetime.now().strftime('%H:%M:%S')}")
-            if self.root.winfo_exists():
-                self.root.after(2000, self._refresh_statuses)
+            self._schedule_status_refresh(2000)
             return
         for repo_name, status_var in self.status_vars.items():
             status = self.sync_engine.status_for(repo_name)
@@ -2965,8 +3171,16 @@ class GitMoApp:
         else:
             self.header_git_var.set("Git: OK")
         self._refresh_log_view()
-        if self.root.winfo_exists():
-            self.root.after(2000, self._refresh_statuses)
+        self._schedule_status_refresh(2000)
+
+    def _schedule_status_refresh(self, delay_ms: int) -> None:
+        if self.status_refresh_after_id is not None:
+            self.root.after_cancel(self.status_refresh_after_id)
+        if self.root.winfo_exists() and self.current_screen == "dashboard":
+            self.status_refresh_after_id = self.root.after(
+                delay_ms,
+                self._refresh_statuses,
+            )
 
     def _enqueue_log(self, repo_name: str, message: str) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,13 @@
 from pathlib import Path
 import unittest
 
-from gitmo.app import RepoSelection, repo_catalog_sort_key
+from gitmo.app import (
+    LocalValue,
+    RepoSelection,
+    repo_catalog_sort_key,
+    repo_settings_state,
+    repo_targets_changed,
+)
 
 
 def selection(name: str, *, github: bool, local: bool) -> RepoSelection:
@@ -16,6 +22,16 @@ def selection(name: str, *, github: bool, local: bool) -> RepoSelection:
 
 
 class RepoCatalogOrderTests(unittest.TestCase):
+    def test_local_value_notifies_without_creating_tk_state(self) -> None:
+        values: list[str] = []
+        value = LocalValue("old")
+        value.trace_add("write", lambda: values.append(value.get()))
+
+        value.set("new")
+
+        self.assertEqual(value.get(), "new")
+        self.assertEqual(values, ["new"])
+
     def test_groups_repositories_then_sorts_each_group_alphabetically(self) -> None:
         repos = [
             selection("Zulu-rest", github=False, local=False),
@@ -43,6 +59,38 @@ class RepoCatalogOrderTests(unittest.TestCase):
                 "Zulu-rest",
             ],
         )
+
+    def test_unchanged_targets_do_not_require_repository_work(self) -> None:
+        repo = selection("example", github=True, local=True)
+
+        self.assertFalse(
+            repo_targets_changed(repo, wants_github=True, wants_local=True)
+        )
+        self.assertTrue(
+            repo_targets_changed(repo, wants_github=False, wants_local=True)
+        )
+
+    def test_repo_settings_state_detects_pending_option_changes(self) -> None:
+        baseline = repo_settings_state(
+            github=True,
+            local=True,
+            enabled=True,
+            sync_mode="two-way",
+            sync_schedule="idle-1m",
+            commit_message_mode="summary",
+            local_path="/tmp/example",
+        )
+        changed = repo_settings_state(
+            github=True,
+            local=True,
+            enabled=True,
+            sync_mode="two-way",
+            sync_schedule="interval-5m",
+            commit_message_mode="summary",
+            local_path="/tmp/example",
+        )
+
+        self.assertNotEqual(baseline, changed)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,14 @@ class RepoConfig:
 
 
 @dataclass
+class CachedGitHubRepo:
+    name: str
+    clone_url: str
+    private: bool = False
+    default_branch: str = "main"
+
+
+@dataclass
 class AppConfig:
     github_token: str = ""
     github_login: str = ""
@@ -35,12 +43,18 @@ class AppConfig:
     gitmo_path: str = ""
     font_size_delta: int = 0
     repos: dict[str, RepoConfig] = field(default_factory=dict)
+    cached_github_login: str = ""
+    cached_github_repos: dict[str, CachedGitHubRepo] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> "AppConfig":
         repos = {
             name: RepoConfig(**repo_data)
             for name, repo_data in data.get("repos", {}).items()
+        }
+        cached_github_repos = {
+            name: CachedGitHubRepo(**repo_data)
+            for name, repo_data in data.get("cached_github_repos", {}).items()
         }
         return cls(
             github_token=data.get("github_token", ""),
@@ -49,6 +63,8 @@ class AppConfig:
             gitmo_path=data.get("gitmo_path", ""),
             font_size_delta=int(data.get("font_size_delta", 0)),
             repos=repos,
+            cached_github_login=data.get("cached_github_login", ""),
+            cached_github_repos=cached_github_repos,
         )
 
     def to_dict(self) -> dict:
@@ -56,6 +72,10 @@ class AppConfig:
         data["repos"] = {
             name: asdict(repo_config)
             for name, repo_config in self.repos.items()
+        }
+        data["cached_github_repos"] = {
+            name: asdict(repo)
+            for name, repo in self.cached_github_repos.items()
         }
         return data
 

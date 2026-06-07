@@ -100,11 +100,23 @@ class GitHubClient:
             page += 1
         return repos
 
-    def create_repo(self, name: str, private: bool = False) -> GitHubRepo:
+    def create_repo(
+        self,
+        name: str,
+        private: bool = False,
+        description: str | None = None,
+    ) -> GitHubRepo:
+        payload: dict[str, str | bool] = {
+            "name": name,
+            "private": private,
+            "auto_init": False,
+        }
+        if description:
+            payload["description"] = description
         data = self._request(
             "POST",
             "/user/repos",
-            payload={"name": name, "private": private, "auto_init": False},
+            payload=payload,
         )
         if not isinstance(data, dict):
             raise GitHubAPIError("Unexpected response while creating repository")

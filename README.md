@@ -23,11 +23,13 @@ replacement for a full Git client or a team merge workflow.
 - Choose one main GitMo folder whose direct child folders become repo candidates
 - Add folders from elsewhere on the computer without moving them
 - Load repositories from the authenticated GitHub account
+- Reopen Manage Repositories quickly from the saved GitHub repo list while refreshing online data in the background
 - Match local folders and GitHub repositories by name
 - Create a GitHub repository for a local folder
 - Clone a GitHub repository that is missing locally
 - Initialize plain local folders as Git repositories
 - Add a basic root `README.md` when a newly uploaded folder has none
+- Create new GitHub repositories as public and describe them from README prose
 - Commit local changes with the message `GitMo autosave`
 - Support one-way and two-way sync modes
 - Detect divergent local and remote history instead of guessing how to merge it
@@ -180,8 +182,10 @@ For a folder elsewhere on disk:
 3. Keep GitHub and Local Folder enabled.
 4. Click `Apply Selection`.
 
-If no matching GitHub repository exists, GitMo creates one, initializes Git when
-needed, creates a root README when missing, commits, and pushes the contents.
+If no matching GitHub repository exists, GitMo creates a public repository and
+uses the first readable README sentence as its GitHub description. It then
+initializes Git when needed, creates a root README when missing, commits, and
+pushes the contents.
 
 ### Clone a GitHub Repository
 
