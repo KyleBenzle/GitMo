@@ -116,6 +116,21 @@ class LocalValue:
         return callback
 
 
+def tail_text_lines(path: Path, count: int, block_size: int = 8192) -> list[str]:
+    if count <= 0 or not path.exists():
+        return []
+    with path.open("rb") as log_file:
+        log_file.seek(0, 2)
+        position = log_file.tell()
+        data = b""
+        while position > 0 and data.count(b"\n") <= count:
+            read_size = min(block_size, position)
+            position -= read_size
+            log_file.seek(position)
+            data = log_file.read(read_size) + data
+    return data.decode("utf-8", errors="replace").splitlines()[-count:]
+
+
 def repo_catalog_sort_key(selection: RepoSelection) -> tuple[int, str, str]:
     if selection.exists_remote and selection.exists_local:
         group = 0
@@ -641,40 +656,24 @@ class GitMoApp:
         self._load_images()
         self.shell = ttk.Frame(root)
         self.shell.pack(fill="both", expand=True)
-        self.content_canvas = tk.Canvas(
-            self.shell,
-            bg=THEME["bg"],
-            highlightthickness=0,
-            bd=0,
-        )
-        self.content_scrollbar = ttk.Scrollbar(
-            self.shell,
-            orient="vertical",
-            command=self.content_canvas.yview,
-        )
-        self.content = ttk.Frame(self.content_canvas, padding=22)
-        self.content_window = self.content_canvas.create_window(
-            (0, 0),
-            window=self.content,
-            anchor="nw",
-        )
-        self.content_canvas.configure(yscrollcommand=self.content_scrollbar.set)
-        self.content_canvas.pack(side="left", fill="both", expand=True)
-        self.content_scrollbar.pack(side="right", fill="y")
-        self.content.bind("<Configure>", self._update_content_scroll_region)
-        self.content_canvas.bind("<Configure>", self._resize_content_window)
-        self._bind_outer_mousewheel()
+        self.content = ttk.Frame(self.shell, padding=22)
+        self.content_host = self.content
+        self.content.pack(fill="both", expand=True)
         self.repo_rows: dict[str, dict[str, LocalValue]] = {}
         self.repo_manager_status_var: tk.StringVar | None = None
         self.repo_manager_status_label: tk.Widget | None = None
+        self.page_frames: dict[str, ttk.Frame] = {}
         self.status_vars: dict[str, tk.StringVar] = {}
         self.status_labels: dict[str, tk.Label] = {}
         self.last_sync_vars: dict[str, tk.StringVar] = {}
         self.header_last_sync_var = tk.StringVar(value="Last Sync: Not yet")
         self.header_git_var = tk.StringVar(value="Git: OK")
+        self.dashboard_watch_var = tk.StringVar(value="Watching")
+        self.dashboard_summary_var = tk.StringVar(value="")
         self.last_checked_var = tk.StringVar(value="")
         self.status_refresh_after_id: str | None = None
         self.log_text: tk.Text | None = None
+        self.dashboard_tree: ttk.Treeview | None = None
         self.fixed_action_bar: tk.Frame | None = None
         self.current_screen = ""
         self.sync_should_run = True
@@ -817,16 +816,18 @@ class GitMoApp:
         danger: bool = False,
     ) -> tk.Frame:
         item = tk.Frame(parent, bg=THEME["panel"], cursor="hand2", padx=16 if not label else 20, pady=12)
-        icon_color = THEME["danger"] if danger else THEME["accent"]
-        icon_label = tk.Label(
-            item,
-            text=icon,
-            bg=THEME["panel"],
-            fg=icon_color,
-            font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta + 10, "bold"),
-            cursor="hand2",
-        )
-        icon_label.pack(side="left", padx=(0, 0 if not label else 10))
+        icon_label = None
+        if icon:
+            icon_color = THEME["danger"] if danger else THEME["accent"]
+            icon_label = tk.Label(
+                item,
+                text=icon,
+                bg=THEME["panel"],
+                fg=icon_color,
+                font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta + 4, "bold"),
+                cursor="hand2",
+            )
+            icon_label.pack(side="left", padx=(0, 0 if not label else 10))
         text_label = None
         if label:
             text_label = tk.Label(
@@ -843,7 +844,8 @@ class GitMoApp:
 
         def on_enter(_event=None) -> None:
             item.configure(bg=THEME["button_hover"])
-            icon_label.configure(bg=THEME["button_hover"])
+            if icon_label:
+                icon_label.configure(bg=THEME["button_hover"])
             if text_label:
                 text_label.configure(bg=THEME["button_hover"])
             if not active:
@@ -851,7 +853,8 @@ class GitMoApp:
 
         def on_leave(_event=None) -> None:
             item.configure(bg=THEME["panel"])
-            icon_label.configure(bg=THEME["panel"])
+            if icon_label:
+                icon_label.configure(bg=THEME["panel"])
             if text_label:
                 text_label.configure(bg=THEME["panel"])
             underline.configure(bg=THEME["accent"] if active else THEME["panel"])
@@ -860,7 +863,9 @@ class GitMoApp:
             if command:
                 command()
 
-        widgets = [item, icon_label]
+        widgets = [item]
+        if icon_label:
+            widgets.append(icon_label)
         if text_label:
             widgets.append(text_label)
         for widget in widgets:
@@ -987,14 +992,46 @@ class GitMoApp:
         if self.status_refresh_after_id is not None:
             self.root.after_cancel(self.status_refresh_after_id)
             self.status_refresh_after_id = None
-        self._bind_outer_mousewheel()
         if self.fixed_action_bar is not None:
             self.fixed_action_bar.destroy()
             self.fixed_action_bar = None
         for child in self.content.winfo_children():
             child.destroy()
         self.log_text = None
-        self.content_canvas.yview_moveto(0)
+
+    def _prepare_page(self, name: str, *, reuse: bool) -> bool:
+        if self.status_refresh_after_id is not None:
+            self.root.after_cancel(self.status_refresh_after_id)
+            self.status_refresh_after_id = None
+        if self.fixed_action_bar is not None:
+            self.fixed_action_bar.place_forget()
+        for frame in self.page_frames.values():
+            frame.pack_forget()
+
+        existing = self.page_frames.get(name)
+        if reuse and existing is not None and existing.winfo_exists():
+            self.content = existing
+            existing.pack(fill="both", expand=True)
+            if name == "repos" and self.fixed_action_bar is not None:
+                self.fixed_action_bar.place(relx=0, rely=1, relwidth=1, anchor="sw")
+                self.fixed_action_bar.lift()
+            return False
+
+        if existing is not None and existing.winfo_exists():
+            existing.destroy()
+        frame = ttk.Frame(self.content_host)
+        frame.pack(fill="both", expand=True)
+        self.page_frames[name] = frame
+        self.content = frame
+        return True
+
+    def _discard_page(self, name: str) -> None:
+        frame = self.page_frames.pop(name, None)
+        if frame is not None and frame.winfo_exists():
+            frame.destroy()
+        if name == "dashboard":
+            self.dashboard_tree = None
+            self.log_text = None
 
     def _fixed_bottom_bar(self) -> tk.Frame:
         if self.fixed_action_bar is not None:
@@ -1014,27 +1051,16 @@ class GitMoApp:
         return self.fixed_action_bar
 
     def _update_content_scroll_region(self, _event=None) -> None:
-        self.content_canvas.configure(scrollregion=self.content_canvas.bbox("all"))
+        return
 
     def _resize_content_window(self, event) -> None:
-        self.content_canvas.itemconfigure(
-            self.content_window,
-            width=event.width,
-        )
-        self._update_content_scroll_region()
+        return
 
     def _on_mousewheel(self, event) -> None:
-        if event.num == 4:
-            self.content_canvas.yview_scroll(-3, "units")
-        elif event.num == 5:
-            self.content_canvas.yview_scroll(3, "units")
-        elif event.delta:
-            self.content_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return
 
     def _bind_outer_mousewheel(self) -> None:
-        self.content_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        self.content_canvas.bind_all("<Button-4>", self._on_mousewheel)
-        self.content_canvas.bind_all("<Button-5>", self._on_mousewheel)
+        return
 
     def _bind_nested_mousewheel(self, canvas: tk.Canvas) -> None:
         def scroll_nested(event) -> str:
@@ -1381,6 +1407,7 @@ class GitMoApp:
         self._refresh_current_screen()
 
     def _refresh_current_screen(self) -> None:
+        self._discard_page(self.current_screen)
         if self.current_screen == "login":
             self.show_login_screen()
         elif self.current_screen == "gitmo":
@@ -1520,6 +1547,7 @@ class GitMoApp:
             and not error
             and catalog_changed
         ):
+            self._discard_page("repos")
             self.show_repo_selection_screen()
 
     def _choose_folder(self, *, title: str, initial_path: Path, must_exist: bool) -> Path | None:
@@ -1534,42 +1562,24 @@ class GitMoApp:
         return dialog.result
 
     def _build_ribbon_toolbar(self) -> None:
-        toolbar = tk.Frame(
-            self.content,
-            bg=THEME["panel"],
-            highlightbackground=THEME["line"],
-            highlightcolor=THEME["line"],
-            highlightthickness=1,
-            bd=0,
-        )
+        toolbar = ttk.Frame(self.content, style="Panel.TFrame", padding=(8, 6))
         toolbar.pack(fill="x", pady=(0, 14))
         sync_running = self.sync_should_run
-        sync_icon = "⛔" if sync_running else "▶"
         sync_label = "Stop Sync" if sync_running else "Start Sync"
-        nav_icon = "📊" if self.current_screen == "repos" else "🛢️"
         nav_label = "Dashboard" if self.current_screen == "repos" else "Manage Repos"
         nav_command = self.show_dashboard if self.current_screen == "repos" else self.show_repo_selection_screen
         toolbar_buttons = (
-            (nav_icon, nav_label, nav_command, self.current_screen == "repos", False),
-            (sync_icon, sync_label, self._toggle_sync_running, False, sync_running),
-            ("🖥", "Run in Background", self._run_in_background, False, False),
+            (nav_label, nav_command),
+            (sync_label, self._toggle_sync_running),
+            ("Run in Background", self._run_in_background),
         )
-        for index, (icon, label, command, active, danger) in enumerate(toolbar_buttons):
-            if index:
-                self._ribbon_separator(toolbar)
-            self._ribbon_button(
-                toolbar,
-                icon,
-                label,
-                command,
-                active=active,
-                danger=danger,
-            ).pack(side="left", fill="y")
+        for label, command in toolbar_buttons:
+            ttk.Button(toolbar, text=label, command=command).pack(side="left", padx=(0, 8))
 
     def show_login_screen(self) -> None:
         self.current_screen = "login"
         self._show_window()
-        self._clear()
+        self._prepare_page("login", reuse=False)
         if self.logo_image:
             ttk.Label(self.content, image=self.logo_image).pack(anchor="w", pady=(0, 14))
         self._page_header(
@@ -1628,7 +1638,7 @@ class GitMoApp:
     def show_gitmo_screen(self) -> None:
         self.current_screen = "gitmo"
         self._show_window()
-        self._clear()
+        self._prepare_page("gitmo", reuse=False)
         self._page_header(
             "Choose GitMo Folder",
             "Track direct children of the GitMo folder or folders anywhere on disk.",
@@ -1662,7 +1672,8 @@ class GitMoApp:
     def show_repo_selection_screen(self) -> None:
         self.current_screen = "repos"
         self._show_window()
-        self._clear()
+        if not self._prepare_page("repos", reuse=True):
+            return
         self._build_ribbon_toolbar()
 
         header_card = self._card(self.content, padding=14)
@@ -2235,7 +2246,15 @@ class GitMoApp:
     def show_dashboard(self) -> None:
         self.current_screen = "dashboard"
         self._show_window()
-        self._clear()
+        if not self._prepare_page("dashboard", reuse=True):
+            self.is_paused = not self.sync_should_run
+            self._refresh_dashboard_summary()
+            self._refresh_dashboard_table()
+            self._refresh_log_view()
+            if self.sync_should_run:
+                self._ensure_sync_engine_running()
+            self._schedule_status_refresh(1000)
+            return
         self.status_vars = {}
         self.status_labels = {}
         self.last_sync_vars = {}
@@ -2251,74 +2270,46 @@ class GitMoApp:
             if repo_config.enabled
         ]
         repo_count = len(enabled_repos)
-        mode_values = {repo_config.sync_mode for _name, repo_config in enabled_repos}
-        if not mode_values:
-            mode_text = "No Mode"
-        elif len(mode_values) == 1:
-            mode_text = "Two-Way Mode" if "two-way" in mode_values else "One-Way Mode"
-        else:
-            mode_text = "Mixed Mode"
 
         header_card = self._card(self.content, padding=14)
         header_card.pack(fill="x", pady=(0, 14))
         header = header_card.inner  # type: ignore[attr-defined]
         if self.header_logo_image:
             tk.Label(header, image=self.header_logo_image, bg=THEME["card"]).pack(side="left", anchor="n", padx=(0, 12))
-        title_frame = tk.Frame(header, bg=THEME["card"])
-        title_frame.pack(side="left", anchor="n", fill="x", expand=True)
         tk.Label(
-            title_frame,
+            header,
             text="GitMo",
             bg=THEME["card"],
             fg=THEME["text"],
             font=(FONT_FAMILY, round((BASE_BODY_SIZE + self.config.font_size_delta) * 1.5), "bold"),
             anchor="w",
-        ).pack(fill="x")
+        ).pack(anchor="w")
         tk.Label(
-            title_frame,
+            header,
             text="Auto sync for GitHub folders",
             bg=THEME["card"],
             fg=THEME["muted"],
             font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta),
             anchor="w",
-        ).pack(fill="x", pady=(1, 0))
-        status_frame = tk.Frame(header, bg=THEME["card"])
-        status_frame.pack(side="right", fill="x")
-        status_fg = THEME["success"] if self.sync_should_run else THEME["danger"]
-        status_text = "● Watching" if self.sync_should_run else "● Paused"
-        status_title = tk.Frame(status_frame, bg=THEME["card"])
-        status_title.pack(anchor="e", pady=(0, 8))
+        ).pack(anchor="w", pady=(1, 4))
         tk.Label(
-            status_title,
-            text=status_text,
+            header,
+            textvariable=self.dashboard_watch_var,
             bg=THEME["card"],
-            fg=status_fg,
-            font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta + 2, "bold"),
-        ).pack(side="left")
-
-        status_grid = tk.Frame(status_frame, bg=THEME["card"])
-        status_grid.pack(anchor="e")
-        status_items = (
-            f"Local folder: {self._shorten_path(Path(self.config.gitmo_path).expanduser()) if self.config.gitmo_path else 'Not selected'}",
-            f"{repo_count} repo{'s' if repo_count != 1 else ''} synced",
-            mode_text,
-            self.header_last_sync_var,
-            self.header_git_var,
-        )
-        for row, item in enumerate(status_items):
-            if isinstance(item, tk.StringVar):
-                label = tk.Label(status_grid, textvariable=item)
-            else:
-                label = tk.Label(status_grid, text=item)
-            label.configure(
-                bg=THEME["card"],
-                fg=THEME["muted"] if row in {0, 3, 4} else THEME["text"],
-                anchor="w",
-                padx=8,
-                pady=2,
-                font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta),
-            )
-            label.grid(row=row // 2, column=row % 2, sticky="w", padx=(8, 0))
+            fg=THEME["success"] if self.sync_should_run else THEME["danger"],
+            font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta + 1, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            textvariable=self.dashboard_summary_var,
+            bg=THEME["card"],
+            fg=THEME["muted"],
+            justify="left",
+            anchor="w",
+            font=(FONT_FAMILY, max(8, BASE_BODY_SIZE + self.config.font_size_delta - 1)),
+        ).pack(anchor="w", pady=(2, 0))
+        self._refresh_dashboard_summary()
 
         repos_card = self._card(self.content)
         repos_card.pack(fill="both", expand=True, pady=(0, 12))
@@ -2334,80 +2325,71 @@ class GitMoApp:
         )
         table = tk.Frame(repos, bg=THEME["card"])
         table.pack(fill="both", expand=True)
-        columns = ("Repo", "Mode", "Local Folder", "Status", "Last Sync")
-        widths = (20, 10, 34, 24, 16)
-        for column, (title, width) in enumerate(zip(columns, widths)):
-            tk.Label(
-                table,
-                text=title,
-                bg=THEME["panel_alt"],
-                fg=THEME["muted"],
-                font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta, "bold"),
-                width=width,
+        columns = ("repo", "mode", "local", "status", "last_sync")
+        self.dashboard_tree = ttk.Treeview(
+            table,
+            columns=columns,
+            show="headings",
+            selectmode="none",
+            height=max(3, min(12, repo_count or 3)),
+        )
+        headings = {
+            "repo": "Repo",
+            "mode": "Mode",
+            "local": "Local Folder",
+            "status": "Status",
+            "last_sync": "Last Sync",
+        }
+        widths = {
+            "repo": 175,
+            "mode": 100,
+            "local": 280,
+            "status": 240,
+            "last_sync": 110,
+        }
+        for column in columns:
+            self.dashboard_tree.heading(column, text=headings[column])
+            self.dashboard_tree.column(
+                column,
+                width=widths[column],
+                minwidth=80,
                 anchor="w",
-                padx=8,
-                pady=6,
-            ).grid(row=0, column=column, sticky="ew", padx=(0, 1))
+            )
+        dashboard_scroll = ttk.Scrollbar(
+            table,
+            orient="vertical",
+            command=self.dashboard_tree.yview,
+        )
+        self.dashboard_tree.configure(yscrollcommand=dashboard_scroll.set)
+        self.dashboard_tree.pack(side="left", fill="both", expand=True)
+        dashboard_scroll.pack(side="right", fill="y")
 
-        if not enabled_repos:
-            tk.Label(
-                table,
-                text="No repositories selected yet.",
-                bg=THEME["card"],
-                fg=THEME["muted"],
-                anchor="w",
-                padx=8,
-                pady=12,
-            ).grid(row=1, column=0, columnspan=len(columns), sticky="ew")
-        for row_index, (repo_name, repo_config) in enumerate(enabled_repos, start=1):
+        for repo_name, repo_config in enabled_repos:
             repo_path = self.sync_engine.repo_path_for(repo_name, repo_config)
             status_var = tk.StringVar(value="● Watching")
             last_sync_var = tk.StringVar(value="Not yet")
-            values = (
-                repo_name,
-                repo_config.sync_mode,
-                self._shorten_path(repo_path),
-                status_var,
-                last_sync_var,
+            self.dashboard_tree.insert(
+                "",
+                "end",
+                iid=repo_name,
+                values=(
+                    repo_name,
+                    repo_config.sync_mode,
+                    self._shorten_path(repo_path),
+                    status_var.get(),
+                    last_sync_var.get(),
+                ),
             )
-            for column, value in enumerate(values):
-                if column == 0:
-                    repo_cell = tk.Frame(table, bg=THEME["card"])
-                    repo_cell.grid(row=row_index, column=column, sticky="ew")
-                    tk.Label(
-                        repo_cell,
-                        text="📁",
-                        bg=THEME["card"],
-                        fg=THEME["accent"],
-                        anchor="w",
-                        padx=8,
-                        pady=7,
-                    ).pack(side="left", padx=(0, 4))
-                    tk.Label(
-                        repo_cell,
-                        text=str(value),
-                        bg=THEME["card"],
-                        fg=THEME["text"],
-                        anchor="w",
-                        padx=8,
-                        pady=7,
-                        width=max(1, widths[column] - 3),
-                    ).pack(side="left", fill="x", expand=True, padx=(0, 8))
-                    continue
-                label = tk.Label(table, textvariable=value) if isinstance(value, tk.StringVar) else tk.Label(table, text=value)
-                label.configure(
-                    bg=THEME["card"],
-                    fg=THEME["success"] if column == 3 else THEME["text"],
-                    anchor="w",
-                    padx=8,
-                    pady=7,
-                    width=widths[column],
-                )
-                label.grid(row=row_index, column=column, sticky="ew")
-                if column == 3:
-                    self.status_labels[repo_name] = label
             self.status_vars[repo_name] = status_var
             self.last_sync_vars[repo_name] = last_sync_var
+
+        if not enabled_repos:
+            self.dashboard_tree.insert(
+                "",
+                "end",
+                iid="__empty__",
+                values=("No repositories selected yet.", "", "", "", ""),
+            )
 
         log_card = self._card(self.content)
         log_card.pack(fill="x", pady=(0, 12))
@@ -2493,9 +2475,7 @@ class GitMoApp:
         self.sync_engine.stop()
         for repo_name, status_var in self.status_vars.items():
             status_var.set("● Paused")
-            label = self.status_labels.get(repo_name)
-            if label:
-                label.configure(fg=THEME["muted"])
+            self._refresh_dashboard_tree_row(repo_name)
         self.show_dashboard()
 
     def _clear_log_and_refresh(self) -> None:
@@ -2507,7 +2487,7 @@ class GitMoApp:
             return
         APP_DIR.mkdir(parents=True, exist_ok=True)
         LOG_PATH.touch(exist_ok=True)
-        lines = LOG_PATH.read_text(encoding="utf-8").splitlines()[-80:]
+        lines = tail_text_lines(LOG_PATH, 80)
         display_lines = [self._format_log_line(line) for line in lines]
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
@@ -2522,6 +2502,77 @@ class GitMoApp:
         if len(date) == 10 and len(time_text) == 8:
             return f"{date}   {time_text}   {message}"
         return line
+
+    def _refresh_dashboard_tree_row(self, repo_name: str) -> None:
+        if self.dashboard_tree is None or not self.dashboard_tree.exists(repo_name):
+            return
+        repo_config = self.config.repos.get(repo_name)
+        if repo_config is None:
+            return
+        repo_path = self.sync_engine.repo_path_for(repo_name, repo_config)
+        self.dashboard_tree.item(
+            repo_name,
+            values=(
+                repo_name,
+                repo_config.sync_mode,
+                self._shorten_path(repo_path),
+                self.status_vars.get(repo_name, tk.StringVar(value="● Watching")).get(),
+                self.last_sync_vars.get(repo_name, tk.StringVar(value="Not yet")).get(),
+            ),
+        )
+
+    def _refresh_dashboard_summary(self) -> None:
+        enabled_repos = [
+            repo_config
+            for repo_config in self.config.repos.values()
+            if repo_config.enabled
+        ]
+        modes = {repo.sync_mode for repo in enabled_repos}
+        if not modes:
+            mode_text = "No mode"
+        elif len(modes) == 1:
+            mode_text = "Two-way" if "two-way" in modes else "One-way"
+        else:
+            mode_text = "Mixed mode"
+        folder = (
+            self._shorten_path(Path(self.config.gitmo_path).expanduser())
+            if self.config.gitmo_path
+            else "Not selected"
+        )
+        self.dashboard_watch_var.set("Watching" if self.sync_should_run else "Paused")
+        self.dashboard_summary_var.set(
+            f"{len(enabled_repos)} repos | {mode_text} | {folder}\n"
+            f"{self.header_last_sync_var.get()} | {self.header_git_var.get()}"
+        )
+
+    def _refresh_dashboard_table(self) -> None:
+        if self.dashboard_tree is None:
+            return
+        enabled_names = {
+            name
+            for name, repo_config in self.config.repos.items()
+            if repo_config.enabled
+        }
+        existing = set(self.dashboard_tree.get_children())
+        if "__empty__" in existing and enabled_names:
+            self.dashboard_tree.delete("__empty__")
+            existing.remove("__empty__")
+        for repo_name in existing - enabled_names:
+            if self.dashboard_tree.exists(repo_name):
+                self.dashboard_tree.delete(repo_name)
+        for repo_name in sorted(enabled_names):
+            self.status_vars.setdefault(repo_name, tk.StringVar(value="● Watching"))
+            self.last_sync_vars.setdefault(repo_name, tk.StringVar(value="Not yet"))
+            if not self.dashboard_tree.exists(repo_name):
+                self.dashboard_tree.insert("", "end", iid=repo_name)
+            self._refresh_dashboard_tree_row(repo_name)
+        if not enabled_names and not self.dashboard_tree.exists("__empty__"):
+            self.dashboard_tree.insert(
+                "",
+                "end",
+                iid="__empty__",
+                values=("No repositories selected yet.", "", "", "", ""),
+            )
 
     def _status_text_and_color(self, state: str, detail: str) -> tuple[str, str]:
         if state == "idle":
@@ -2665,6 +2716,7 @@ class GitMoApp:
             self.repo_catalog.append(selection)
             self.repo_catalog.sort(key=lambda item: item.name.lower())
 
+        self._discard_page("repos")
         self.show_repo_selection_screen()
 
     def _selected_repo_names(self) -> list[str]:
@@ -2707,6 +2759,7 @@ class GitMoApp:
 
         self._save_repo_rows_to_config()
         self._enqueue_log("app", f"Deleted {deleted} local folder(s).")
+        self._discard_page("repos")
         self.show_repo_selection_screen()
 
     def _delete_selected_github_repos(self) -> None:
@@ -2744,6 +2797,7 @@ class GitMoApp:
         self._save_remote_repo_cache()
         self._save_repo_rows_to_config()
         self._enqueue_log("app", f"Deleted {deleted} GitHub repo(s).")
+        self._discard_page("repos")
         self.show_repo_selection_screen()
 
     def _confirm_destructive_action(self, title: str, detail: str) -> bool:
@@ -2971,6 +3025,8 @@ class GitMoApp:
         except (GitHubAPIError, GitCommandError) as exc:
             messagebox.showerror("GitMo", str(exc))
             return
+        self._discard_page("dashboard")
+        self._discard_page("repos")
         self.show_dashboard()
 
     def _connect_non_repo_folder_to_existing_remote(self, repo_path: Path, remote_repo: GitHubRepo | None) -> None:
@@ -3151,12 +3207,10 @@ class GitMoApp:
             status = self.sync_engine.status_for(repo_name)
             text, color = self._status_text_and_color(status.state, status.detail)
             status_var.set(text)
-            label = self.status_labels.get(repo_name)
-            if label:
-                label.configure(fg=color)
             last_sync_var = self.last_sync_vars.get(repo_name)
             if last_sync_var and status.last_sync_at:
                 last_sync_var.set(datetime.fromtimestamp(status.last_sync_at).strftime("%H:%M:%S"))
+            self._refresh_dashboard_tree_row(repo_name)
         latest_sync_at = max(
             (status.last_sync_at for status in self.sync_engine.repo_statuses.values()),
             default=0.0,
@@ -3170,6 +3224,7 @@ class GitMoApp:
             self.header_git_var.set("Git: Needs attention")
         else:
             self.header_git_var.set("Git: OK")
+        self._refresh_dashboard_summary()
         self._refresh_log_view()
         self._schedule_status_refresh(2000)
 

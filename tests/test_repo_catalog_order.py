@@ -1,5 +1,6 @@
 from pathlib import Path
 import unittest
+import tempfile
 
 from gitmo.app import (
     LocalValue,
@@ -7,6 +8,7 @@ from gitmo.app import (
     repo_catalog_sort_key,
     repo_settings_state,
     repo_targets_changed,
+    tail_text_lines,
 )
 
 
@@ -22,6 +24,16 @@ def selection(name: str, *, github: bool, local: bool) -> RepoSelection:
 
 
 class RepoCatalogOrderTests(unittest.TestCase):
+    def test_tail_text_lines_reads_only_requested_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gitmo.log"
+            path.write_text("\n".join(f"line {index}" for index in range(200)), encoding="utf-8")
+
+            self.assertEqual(
+                tail_text_lines(path, 3),
+                ["line 197", "line 198", "line 199"],
+            )
+
     def test_local_value_notifies_without_creating_tk_state(self) -> None:
         values: list[str] = []
         value = LocalValue("old")
