@@ -100,7 +100,7 @@ class GitHubClient:
             page += 1
         return repos
 
-    def create_repo(self, name: str, private: bool = True) -> GitHubRepo:
+    def create_repo(self, name: str, private: bool = False) -> GitHubRepo:
         data = self._request(
             "POST",
             "/user/repos",
