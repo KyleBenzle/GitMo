@@ -18,6 +18,10 @@ without requiring regular terminal use.
 GitMo is intended for personal backup and low-conflict projects. It is not a
 replacement for a full Git client or a team merge workflow.
 
+<p align="center">
+  <img src="screenshot.png" alt="GitMo dashboard showing synchronized repositories and recent activity" width="850">
+</p>
+
 ## Features
 
 - Choose one main GitMo folder whose direct child folders become repo candidates
@@ -186,6 +190,10 @@ If no matching GitHub repository exists, GitMo creates a public repository and
 uses the first readable README sentence as its GitHub description. It then
 initializes Git when needed, creates a root README when missing, commits, and
 pushes the contents.
+
+<p align="center">
+  <img src="screenshot2.png" alt="GitHub profile showing repositories managed with GitMo" width="850">
+</p>
 
 ### Clone a GitHub Repository
 
