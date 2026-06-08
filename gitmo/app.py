@@ -157,7 +157,7 @@ def repo_targets_changed(
 
 def sync_button_presentation(sync_running: bool) -> tuple[str, str, str]:
     if sync_running:
-        return "■", "Stop Sync", THEME["warning"]
+        return "■", "Stop Sync", THEME["danger"]
     return "▶", "Start Sync", THEME["success"]
 
 
