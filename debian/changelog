@@ -1,8 +1,9 @@
 gitmo (0.1.2-1~ppa1) questing; urgency=medium
 
+  [ lll ]
   * Update GitMo to 0.1.2.
 
- -- lll <lll@lll>  Mon, 08 Jun 2026 15:24:29 -0400
+ -- Kyle Benzle <kbe@gmx.us>  Mon, 08 Jun 2026 15:26:40 -0400
 
 gitmo (0.1.2-1) unstable; urgency=medium
 
