@@ -8,6 +8,7 @@ from gitmo.app import (
     repo_catalog_sort_key,
     repo_settings_state,
     repo_targets_changed,
+    sync_button_presentation,
     tail_text_lines,
 )
 
@@ -43,6 +44,10 @@ class RepoCatalogOrderTests(unittest.TestCase):
 
         self.assertEqual(value.get(), "new")
         self.assertEqual(values, ["new"])
+
+    def test_sync_button_presentation_tracks_running_state(self) -> None:
+        self.assertEqual(sync_button_presentation(True)[:2], ("■", "Stop Sync"))
+        self.assertEqual(sync_button_presentation(False)[:2], ("▶", "Start Sync"))
 
     def test_groups_repositories_then_sorts_each_group_alphabetically(self) -> None:
         repos = [

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.kylebenzle.gitmo</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>GitMo</name>
+  <summary>Automatic GitHub sync for local project folders</summary>
+  <developer id="com.kylebenzle">
+    <name>Kyle Benzle</name>
+  </developer>
+  <description>
+    <p>
+      GitMo is a Linux desktop app for keeping selected local folders synced to
+      GitHub repositories with automatic commits and pushes.
+    </p>
+    <p>
+      It supports GitHub-backed local project folders, outside-folder sync,
+      one-way and two-way sync modes, background operation, and a system tray
+      indicator.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.kylebenzle.gitmo.desktop</launchable>
+  <url type="homepage">https://github.com/KyleBenzle/GitMo</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>GitMo repository sync dashboard</caption>
+      <image type="source" width="880" height="865">https://raw.githubusercontent.com/KyleBenzle/GitMo/refs/heads/master/GitMoScreenshot.png</image>
+    </screenshot>
+  </screenshots>
+  <categories>
+    <category>Development</category>
+    <category>RevisionControl</category>
+  </categories>
+  <provides>
+    <binary>gitmo</binary>
+  </provides>
+  <releases>
+    <release version="0.1.2" date="2026-06-07">
+      <description>
+        <p>Add configurable sync schedules, repository ordering, and improved tray activation.</p>
+      </description>
+    </release>
+    <release version="0.1.1" date="2026-05-31">
+      <description>
+        <p>Initial packaged release.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1" />
+</component>

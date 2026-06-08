@@ -1,0 +1,12 @@
+Package: gitmo
+Version: 0.1.2-1
+Architecture: all
+Maintainer: Kyle Benzle <kbe@gmx.us>
+Installed-Size: 3824
+Depends: python3:any, git, gir1.2-ayatanaappindicator3-0.1, gir1.2-gtk-3.0, libnotify-bin, python3-gi, python3-tk, xdg-utils
+Section: vcs
+Priority: optional
+Homepage: https://github.com/KyleBenzle/GitMo
+Description: Automatic GitHub sync for local project folders
+ GitMo is a Linux desktop app for keeping selected local folders synced
+ to GitHub repositories with automatic commits and pushes.
