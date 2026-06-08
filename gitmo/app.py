@@ -681,7 +681,9 @@ class GitMoApp:
         self.last_checked_var = tk.StringVar(value="")
         self.status_refresh_after_id: str | None = None
         self.log_text: tk.Text | None = None
+        self.log_display_text = ""
         self.dashboard_tree: ttk.Treeview | None = None
+        self.dashboard_row_values: dict[str, tuple[str, str, str, str, str]] = {}
         self.fixed_action_bar: tk.Frame | None = None
         self.current_screen = ""
         self.sync_should_run = True
@@ -1042,7 +1044,9 @@ class GitMoApp:
             frame.destroy()
         if name == "dashboard":
             self.dashboard_tree = None
+            self.dashboard_row_values = {}
             self.log_text = None
+            self.log_display_text = ""
             self.dashboard_watch_label = None
 
     def _fixed_bottom_bar(self) -> tk.Frame:
@@ -2422,18 +2426,20 @@ class GitMoApp:
             repo_path = self.sync_engine.repo_path_for(repo_name, repo_config)
             status_var = tk.StringVar(value="🟢 Watching")
             last_sync_var = tk.StringVar(value="Not yet")
+            values = (
+                repo_name,
+                repo_config.sync_mode,
+                self._shorten_path(repo_path),
+                status_var.get(),
+                last_sync_var.get(),
+            )
             self.dashboard_tree.insert(
                 "",
                 "end",
                 iid=repo_name,
-                values=(
-                    repo_name,
-                    repo_config.sync_mode,
-                    self._shorten_path(repo_path),
-                    status_var.get(),
-                    last_sync_var.get(),
-                ),
+                values=values,
             )
+            self.dashboard_row_values[repo_name] = values
             self.status_vars[repo_name] = status_var
             self.last_sync_vars[repo_name] = last_sync_var
 
@@ -2567,10 +2573,14 @@ class GitMoApp:
         LOG_PATH.touch(exist_ok=True)
         lines = tail_text_lines(LOG_PATH, 80)
         display_lines = [self._format_log_line(line) for line in lines]
+        display_text = "\n".join(display_lines) if display_lines else "No activity yet."
+        if display_text == self.log_display_text:
+            return
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
-        self.log_text.insert("1.0", "\n".join(display_lines) if display_lines else "No activity yet.")
+        self.log_text.insert("1.0", display_text)
         self.log_text.configure(state="disabled")
+        self.log_display_text = display_text
 
     def _format_log_line(self, line: str) -> str:
         parts = line.split(" ", 2)
@@ -2588,16 +2598,19 @@ class GitMoApp:
         if repo_config is None:
             return
         repo_path = self.sync_engine.repo_path_for(repo_name, repo_config)
-        self.dashboard_tree.item(
+        status_var = self.status_vars.get(repo_name)
+        last_sync_var = self.last_sync_vars.get(repo_name)
+        values = (
             repo_name,
-            values=(
-                repo_name,
-                repo_config.sync_mode,
-                self._shorten_path(repo_path),
-                self.status_vars.get(repo_name, tk.StringVar(value="🟢 Watching")).get(),
-                self.last_sync_vars.get(repo_name, tk.StringVar(value="Not yet")).get(),
-            ),
+            repo_config.sync_mode,
+            self._shorten_path(repo_path),
+            status_var.get() if status_var is not None else "🟢 Watching",
+            last_sync_var.get() if last_sync_var is not None else "Not yet",
         )
+        if self.dashboard_row_values.get(repo_name) == values:
+            return
+        self.dashboard_tree.item(repo_name, values=values)
+        self.dashboard_row_values[repo_name] = values
 
     def _refresh_dashboard_summary(self) -> None:
         enabled_repos = [
@@ -2638,6 +2651,7 @@ class GitMoApp:
         for repo_name in existing - enabled_names:
             if self.dashboard_tree.exists(repo_name):
                 self.dashboard_tree.delete(repo_name)
+            self.dashboard_row_values.pop(repo_name, None)
         for repo_name in sorted(enabled_names):
             self.status_vars.setdefault(repo_name, tk.StringVar(value="🟢 Watching"))
             self.last_sync_vars.setdefault(repo_name, tk.StringVar(value="Not yet"))
@@ -3297,11 +3311,17 @@ class GitMoApp:
         for repo_name, status_var in self.status_vars.items():
             status = self.sync_engine.status_for(repo_name)
             text, color = self._status_text_and_color(status.state, status.detail)
-            status_var.set(text)
+            row_changed = status_var.get() != text
+            if row_changed:
+                status_var.set(text)
             last_sync_var = self.last_sync_vars.get(repo_name)
             if last_sync_var and status.last_sync_at:
-                last_sync_var.set(datetime.fromtimestamp(status.last_sync_at).strftime("%H:%M:%S"))
-            self._refresh_dashboard_tree_row(repo_name)
+                last_sync_text = datetime.fromtimestamp(status.last_sync_at).strftime("%H:%M:%S")
+                if last_sync_var.get() != last_sync_text:
+                    last_sync_var.set(last_sync_text)
+                    row_changed = True
+            if row_changed:
+                self._refresh_dashboard_tree_row(repo_name)
         latest_sync_at = max(
             (status.last_sync_at for status in self.sync_engine.repo_statuses.values()),
             default=0.0,
@@ -3340,6 +3360,7 @@ class GitMoApp:
             keep_running = messagebox.askyesno(
                 "GitMo",
                 "Keep GitMo running in the background?\n\nYes: keep syncing in the background.\nNo: stop syncing and close GitMo.",
+                parent=self.root,
             )
             if keep_running:
                 self._run_in_background()
