@@ -7,6 +7,7 @@ copies share the same saved token, GitMo folder, and selected repos.
 """
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -85,7 +86,7 @@ class AppConfig:
 def load_config() -> AppConfig:
     config_path = CONFIG_PATH if CONFIG_PATH.exists() else LEGACY_CONFIG_PATH
     if not config_path.exists():
-        return AppConfig()
+        return AppConfig(github_token=load_github_token())
     data = json.loads(config_path.read_text(encoding="utf-8"))
     config = AppConfig.from_dict(data)
     saved_token = load_github_token()
@@ -93,6 +94,7 @@ def load_config() -> AppConfig:
         config.github_token = saved_token
     elif config.github_token:
         save_github_token(config.github_token)
+        save_config(config)
     return config
 
 
@@ -101,11 +103,7 @@ def save_config(config: AppConfig) -> None:
     APP_DIR.chmod(0o700)
     if config.github_token:
         save_github_token(config.github_token)
-    CONFIG_PATH.write_text(
-        json.dumps(config.to_dict(), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    CONFIG_PATH.chmod(0o600)
+    write_private_json(CONFIG_PATH, config.to_dict())
 
 
 def load_github_token() -> str:
@@ -120,8 +118,12 @@ def load_github_token() -> str:
 def save_github_token(token: str) -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
     APP_DIR.chmod(0o700)
-    CREDENTIALS_PATH.write_text(
-        json.dumps({"github_token": token}, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    CREDENTIALS_PATH.chmod(0o600)
+    write_private_json(CREDENTIALS_PATH, {"github_token": token})
+
+
+def write_private_json(path: Path, data: dict) -> None:
+    content = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    file_descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    path.chmod(0o600)

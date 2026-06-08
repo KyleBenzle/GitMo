@@ -95,6 +95,18 @@ def has_remote(path: Path, name: str = "origin") -> bool:
         return False
 
 
+def sanitize_remote_url(path: Path, name: str = "origin") -> bool:
+    try:
+        current_url = run_git(["remote", "get-url", name], cwd=path)
+    except GitCommandError:
+        return False
+    clean_url = public_clone_url(current_url)
+    if clean_url == current_url:
+        return False
+    run_git(["remote", "set-url", name, clean_url], cwd=path)
+    return True
+
+
 def set_local_identity(path: Path, name: str, email: str) -> None:
     run_git(["config", "user.name", name], cwd=path)
     run_git(["config", "user.email", email], cwd=path)

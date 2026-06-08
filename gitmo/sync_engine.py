@@ -28,6 +28,7 @@ from gitmo.git_cli import (
     is_git_repo,
     pull_ff_only,
     push,
+    sanitize_remote_url,
     set_remote_url,
     stage_all,
     upstream_branch,
@@ -103,6 +104,8 @@ class SyncEngine:
                 self._set_status(repo_name, "missing", "Local repository is missing.")
                 continue
             try:
+                if sanitize_remote_url(repo_path):
+                    self.logger(repo_name, "Removed saved credentials from the Git remote URL.")
                 self._sync_repo(
                     repo_path,
                     repo_name,
