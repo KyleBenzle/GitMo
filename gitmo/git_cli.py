@@ -8,6 +8,7 @@ branch, commit, fetch, pull, and push logic in Python.
 
 import os
 import subprocess
+import tempfile
 import urllib.parse
 from pathlib import Path
 
@@ -16,15 +17,44 @@ class GitCommandError(RuntimeError):
     pass
 
 
-def run_git(args: list[str], cwd: Path | None = None) -> str:
-    command = ["git", *args]
-    result = subprocess.run(
-        command,
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+def git_auth_env(token: str = "") -> tuple[dict[str, str], Path | None]:
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if not token:
+        return env, None
+
+    handle = tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8")
+    askpass_path = Path(handle.name)
+    handle.write(
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        "  *Username*) printf '%s\\n' 'x-access-token' ;;\n"
+        "  *) printf '%s\\n' \"$GITMO_GITHUB_TOKEN\" ;;\n"
+        "esac\n"
     )
+    handle.close()
+    askpass_path.chmod(0o700)
+    env["GIT_ASKPASS"] = str(askpass_path)
+    env["GITMO_GITHUB_TOKEN"] = token
+    return env, askpass_path
+
+
+def run_git(args: list[str], cwd: Path | None = None, token: str = "") -> str:
+    command = ["git", *args]
+    env, askpass_path = git_auth_env(token)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    finally:
+        if askpass_path is not None:
+            try:
+                askpass_path.unlink()
+            except OSError:
+                pass
     if result.returncode != 0:
         stderr = result.stderr.strip()
         stdout = result.stdout.strip()
@@ -41,8 +71,8 @@ def is_git_repo(path: Path) -> bool:
     return Path(top_level).resolve() == path.resolve()
 
 
-def clone_repo(clone_url: str, target_path: Path) -> None:
-    run_git(["clone", clone_url, str(target_path)])
+def clone_repo(clone_url: str, target_path: Path, token: str = "") -> None:
+    run_git(["clone", public_clone_url(clone_url), str(target_path)], token=token)
 
 
 def init_repo(path: Path) -> None:
@@ -50,11 +80,11 @@ def init_repo(path: Path) -> None:
 
 
 def add_remote(path: Path, clone_url: str) -> None:
-    run_git(["remote", "add", "origin", clone_url], cwd=path)
+    run_git(["remote", "add", "origin", public_clone_url(clone_url)], cwd=path)
 
 
 def set_remote_url(path: Path, clone_url: str) -> None:
-    run_git(["remote", "set-url", "origin", clone_url], cwd=path)
+    run_git(["remote", "set-url", "origin", public_clone_url(clone_url)], cwd=path)
 
 
 def has_remote(path: Path, name: str = "origin") -> bool:
@@ -117,23 +147,23 @@ def commit(path: Path, message: str) -> bool:
     return True
 
 
-def push(path: Path, set_upstream: bool = False, branch: str | None = None) -> None:
+def push(path: Path, set_upstream: bool = False, branch: str | None = None, token: str = "") -> None:
     if set_upstream and branch:
-        run_git(["push", "-u", "origin", branch], cwd=path)
+        run_git(["push", "-u", "origin", branch], cwd=path, token=token)
     else:
-        run_git(["push"], cwd=path)
+        run_git(["push"], cwd=path, token=token)
 
 
-def force_push(path: Path, branch: str) -> None:
-    run_git(["push", "--force", "-u", "origin", branch], cwd=path)
+def force_push(path: Path, branch: str, token: str = "") -> None:
+    run_git(["push", "--force", "-u", "origin", branch], cwd=path, token=token)
 
 
-def pull_ff_only(path: Path) -> None:
-    run_git(["pull", "--ff-only"], cwd=path)
+def pull_ff_only(path: Path, token: str = "") -> None:
+    run_git(["pull", "--ff-only"], cwd=path, token=token)
 
 
-def fetch(path: Path) -> None:
-    run_git(["fetch", "origin"], cwd=path)
+def fetch(path: Path, token: str = "") -> None:
+    run_git(["fetch", "origin"], cwd=path, token=token)
 
 
 def upstream_branch(path: Path) -> str | None:
@@ -152,9 +182,10 @@ def ahead_behind(path: Path) -> tuple[int, int]:
     return int(ahead_str), int(behind_str)
 
 
-def authenticated_clone_url(token: str, clone_url: str) -> str:
+def public_clone_url(clone_url: str) -> str:
     parsed = urllib.parse.urlparse(clone_url)
     if parsed.scheme not in {"http", "https"}:
         return clone_url
-    auth_netloc = f"{urllib.parse.quote(token, safe='')}@{parsed.netloc}"
-    return urllib.parse.urlunparse(parsed._replace(netloc=auth_netloc))
+    if "@" not in parsed.netloc:
+        return clone_url
+    return urllib.parse.urlunparse(parsed._replace(netloc=parsed.hostname or parsed.netloc))

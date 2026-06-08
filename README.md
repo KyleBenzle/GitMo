@@ -306,10 +306,16 @@ Autostart entry:
 Legacy configuration at `~/.config/gitlo/config.json` is read during migration
 from the older application name.
 
-The current release stores the GitHub token in the local JSON configuration and
-uses authenticated HTTPS Git remote URLs. Protect the user account and config
-directory, use a narrowly scoped token, and revoke any token that may have been
-exposed.
+The current release stores the GitHub token in:
+
+```text
+~/.config/gitmo/credentials.json
+```
+
+GitMo writes normal HTTPS Git remote URLs without the token. Git authentication
+is supplied only while GitMo runs a Git command. Protect the user account and
+config directory, use a narrowly scoped token, and revoke any token that may
+have been exposed.
 
 ## Current Limitations
 

@@ -157,7 +157,7 @@ class SyncEngine:
             status.change_signature = ""
 
     def _sync_one_way(self, repo_path: Path, repo_name: str) -> bool:
-        fetch(repo_path)
+        fetch(repo_path, token=self.config.github_token)
         ahead, behind = ahead_behind(repo_path)
         if behind > 0:
             self._set_status(
@@ -167,14 +167,14 @@ class SyncEngine:
             )
             return False
         elif ahead > 0:
-            push(repo_path)
+            push(repo_path, token=self.config.github_token)
             self._set_status(repo_name, "synced", f"Pushed {ahead} local commit(s).")
         else:
             self._set_status(repo_name, "idle", "Watching for local changes.")
         return True
 
     def _sync_two_way(self, repo_path: Path, repo_name: str) -> bool:
-        fetch(repo_path)
+        fetch(repo_path, token=self.config.github_token)
         ahead, behind = ahead_behind(repo_path)
         if ahead > 0 and behind > 0:
             self._set_status(
@@ -184,10 +184,10 @@ class SyncEngine:
             )
             return False
         if behind > 0:
-            pull_ff_only(repo_path)
+            pull_ff_only(repo_path, token=self.config.github_token)
             self._set_status(repo_name, "pulled", f"Pulled {behind} remote commit(s).")
         elif ahead > 0:
-            push(repo_path)
+            push(repo_path, token=self.config.github_token)
             self._set_status(repo_name, "synced", f"Pushed {ahead} local commit(s).")
         else:
             self._set_status(repo_name, "idle", "Watching for local and remote changes.")
@@ -218,10 +218,15 @@ class SyncEngine:
         message = commit_message_for(repo_config.commit_message_mode, status_text)
         if commit(repo_path, message):
             if upstream_branch(repo_path):
-                push(repo_path)
+                push(repo_path, token=self.config.github_token)
             else:
                 branch = current_branch(repo_path) or "main"
-                push(repo_path, set_upstream=True, branch=branch)
+                push(
+                    repo_path,
+                    set_upstream=True,
+                    branch=branch,
+                    token=self.config.github_token,
+                )
             self._set_status(repo_name, "synced", "Committed and pushed local changes.")
 
     def prepare_new_remote_repo(self, repo_path: Path, clone_url: str, force: bool = False) -> None:
@@ -242,9 +247,14 @@ class SyncEngine:
         if force:
             from gitmo.git_cli import force_push
 
-            force_push(repo_path, branch)
+            force_push(repo_path, branch, token=self.config.github_token)
         else:
-            push(repo_path, set_upstream=True, branch=branch)
+            push(
+                repo_path,
+                set_upstream=True,
+                branch=branch,
+                token=self.config.github_token,
+            )
 
 def commit_message_for(mode: str, status_text: str, now: datetime | None = None) -> str:
     if mode == "datetime":

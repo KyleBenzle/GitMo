@@ -17,6 +17,7 @@ from tkinter import messagebox, simpledialog, ttk
 from gitmo.config import (
     APP_DIR,
     CONFIG_PATH,
+    CREDENTIALS_PATH,
     LEGACY_CONFIG_PATH,
     LOG_PATH,
     AppConfig,
@@ -28,7 +29,6 @@ from gitmo.config import (
 from gitmo.github_api import GitHubAPIError, GitHubClient, GitHubRepo
 from gitmo.git_cli import (
     GitCommandError,
-    authenticated_clone_url,
     clone_repo,
     init_repo,
     is_git_repo,
@@ -1324,7 +1324,7 @@ class GitMoApp:
         if self.tray_thread_started:
             self.tray_command_queue.put("hide")
 
-        for path in (CONFIG_PATH, LEGACY_CONFIG_PATH):
+        for path in (CONFIG_PATH, CREDENTIALS_PATH, LEGACY_CONFIG_PATH):
             try:
                 if path.exists():
                     path.unlink()
@@ -3062,7 +3062,11 @@ class GitMoApp:
                     continue
 
                 if selection.exists_remote and not selection.exists_local:
-                    clone_repo(self._authenticated_url(selection.clone_url or ""), repo_path)
+                    clone_repo(
+                        selection.clone_url or "",
+                        repo_path,
+                        token=self.config.github_token,
+                    )
                     self._set_repo_identity(repo_path)
                     self._enqueue_log(selection.name, f"Cloned into {repo_path}.")
                     continue
@@ -3083,7 +3087,7 @@ class GitMoApp:
 
                 if selection.exists_local and selection.exists_remote:
                     if selection.local_is_repo:
-                        set_remote_url(repo_path, self._authenticated_url(selection.clone_url or ""))
+                        set_remote_url(repo_path, selection.clone_url or "")
                         self._set_repo_identity(repo_path)
                     else:
                         self._connect_non_repo_folder_to_existing_remote(repo_path, remote_repo)
@@ -3108,7 +3112,7 @@ class GitMoApp:
             raise GitCommandError("Missing GitHub repo details for selected folder.")
 
         if self._folder_is_empty(repo_path):
-            clone_repo(self._authenticated_url(remote_repo.clone_url), repo_path)
+            clone_repo(remote_repo.clone_url, repo_path, token=self.config.github_token)
             self._set_repo_identity(repo_path)
             self._enqueue_log(remote_repo.name, f"Cloned GitHub repo into empty folder {repo_path}.")
             return
@@ -3131,7 +3135,7 @@ class GitMoApp:
         prep_engine = SyncEngine(self.config, self._enqueue_log)
         prep_engine.prepare_new_remote_repo(
             repo_path,
-            self._authenticated_url(remote_repo.clone_url),
+            remote_repo.clone_url,
             force=True,
         )
         self._enqueue_log(remote_repo.name, f"Force-pushed local folder contents from {repo_path}.")
@@ -3144,7 +3148,7 @@ class GitMoApp:
         self._ensure_readme(repo_path, remote_repo.name)
         self._set_repo_identity(repo_path)
         prep_engine = SyncEngine(self.config, self._enqueue_log)
-        prep_engine.prepare_new_remote_repo(repo_path, self._authenticated_url(remote_repo.clone_url))
+        prep_engine.prepare_new_remote_repo(repo_path, remote_repo.clone_url)
 
     def _ensure_readme(self, repo_path: Path, repo_name: str) -> None:
         if any(path.is_file() and path.name.lower().startswith("readme") for path in repo_path.iterdir()):
@@ -3159,9 +3163,6 @@ class GitMoApp:
             self.config.github_login or "GitMo",
             self.config.github_email or "gitmo@users.noreply.github.com",
         )
-
-    def _authenticated_url(self, clone_url: str) -> str:
-        return authenticated_clone_url(self.config.github_token, clone_url)
 
     def _shorten_path(self, path: Path) -> str:
         text = str(path)
