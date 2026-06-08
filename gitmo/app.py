@@ -2109,8 +2109,8 @@ class GitMoApp:
             return (
                 "☑" if bool(row["selected"].get()) else "☐",
                 repo_name,
-                "✓" if bool(row["github"].get()) else "✕",
-                "✓" if local_enabled else "✕",
+                "✅" if bool(row["github"].get()) else "❌",
+                "✅" if local_enabled else "❌",
                 self._shorten_folder_parent(local_path) if local_enabled else "",
             )
 
