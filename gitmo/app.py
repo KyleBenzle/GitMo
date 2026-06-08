@@ -2311,10 +2311,35 @@ class GitMoApp:
         header_card = self._card(self.content, padding=14)
         header_card.pack(fill="x", pady=(0, 14))
         header = header_card.inner  # type: ignore[attr-defined]
+
+        status_header = tk.Frame(header, bg=THEME["card"])
+        status_header.pack(side="right", anchor="ne", padx=(18, 0))
+        self.dashboard_watch_label = tk.Label(
+            status_header,
+            textvariable=self.dashboard_watch_var,
+            bg=THEME["card"],
+            fg=THEME["success"] if self.sync_should_run else THEME["danger"],
+            font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta + 1, "bold"),
+            justify="right",
+            anchor="e",
+        )
+        self.dashboard_watch_label.pack(fill="x", anchor="e")
+        tk.Label(
+            status_header,
+            textvariable=self.dashboard_summary_var,
+            bg=THEME["card"],
+            fg=THEME["muted"],
+            justify="right",
+            anchor="e",
+            font=(FONT_FAMILY, max(8, BASE_BODY_SIZE + self.config.font_size_delta - 1)),
+        ).pack(fill="x", anchor="e", pady=(2, 0))
+
         if self.header_logo_image:
             tk.Label(header, image=self.header_logo_image, bg=THEME["card"]).pack(side="left", anchor="n", padx=(0, 12))
+        branding = tk.Frame(header, bg=THEME["card"])
+        branding.pack(side="left", anchor="nw", fill="x", expand=True)
         tk.Label(
-            header,
+            branding,
             text="GitMo",
             bg=THEME["card"],
             fg=THEME["text"],
@@ -2322,31 +2347,13 @@ class GitMoApp:
             anchor="w",
         ).pack(anchor="w")
         tk.Label(
-            header,
+            branding,
             text="Auto sync for GitHub folders",
             bg=THEME["card"],
             fg=THEME["muted"],
             font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta),
             anchor="w",
-        ).pack(anchor="w", pady=(1, 4))
-        self.dashboard_watch_label = tk.Label(
-            header,
-            textvariable=self.dashboard_watch_var,
-            bg=THEME["card"],
-            fg=THEME["success"] if self.sync_should_run else THEME["danger"],
-            font=(FONT_FAMILY, BASE_BODY_SIZE + self.config.font_size_delta + 1, "bold"),
-            anchor="w",
-        )
-        self.dashboard_watch_label.pack(anchor="w")
-        tk.Label(
-            header,
-            textvariable=self.dashboard_summary_var,
-            bg=THEME["card"],
-            fg=THEME["muted"],
-            justify="left",
-            anchor="w",
-            font=(FONT_FAMILY, max(8, BASE_BODY_SIZE + self.config.font_size_delta - 1)),
-        ).pack(anchor="w", pady=(2, 0))
+        ).pack(anchor="w", pady=(1, 0))
         self._refresh_dashboard_summary()
 
         repos_card = self._card(self.content)
