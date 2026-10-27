@@ -100,6 +100,9 @@ class SyncEngine:
             if not repo_config.enabled:
                 continue
             repo_path = self.repo_path_for(repo_name, repo_config)
+            if repo_path is None:
+                self._set_status(repo_name, "missing", "No local folder is set.")
+                continue
             if not repo_path.exists() or not is_git_repo(repo_path):
                 self._set_status(repo_name, "missing", "Local repository is missing.")
                 continue
@@ -117,10 +120,10 @@ class SyncEngine:
             except Exception as exc:  # pragma: no cover
                 self._set_status(repo_name, "error", f"Unexpected error: {exc}")
 
-    def repo_path_for(self, repo_name: str, repo_config: RepoConfig) -> Path:
+    def repo_path_for(self, repo_name: str, repo_config: RepoConfig) -> Path | None:
         if repo_config.local_path:
             return Path(repo_config.local_path).expanduser()
-        return Path(self.config.gitmo_path).expanduser() / repo_name
+        return None
 
     def _sync_repo(
         self,

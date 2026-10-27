@@ -87,10 +87,13 @@ THEME = {
 }
 
 
+GITHUB_REPO_NAME_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,100}")
+
+
 @dataclass
 class RepoSelection:
     name: str
-    local_path: Path
+    local_path: Path | None
     exists_local: bool
     exists_remote: bool
     local_is_repo: bool
@@ -652,7 +655,6 @@ class GitMoApp:
         self.tray_thread_started = False
         self.tray_unavailable = False
         self.repo_catalog: list[RepoSelection] = []
-        self.manual_folder_paths: dict[str, Path] = {}
         self.pending_added_folder_names: set[str] = set()
         self.log_lock = threading.Lock()
         self.sync_engine = SyncEngine(self.config, self._enqueue_log)
@@ -695,7 +697,7 @@ class GitMoApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def run(self) -> None:
-        if self.config.github_token and self.config.gitmo_path:
+        if self.config.github_token:
             self._try_resume()
         else:
             self.show_login_screen()
@@ -958,7 +960,6 @@ class GitMoApp:
         file_menu.add_command(label="View Logs", command=self._view_logs)
         file_menu.add_command(label="Manage Repos", command=self._open_repo_manager)
         file_menu.add_command(label="Add Local Folder", command=self._add_outside_folder_selection)
-        file_menu.add_command(label="Choose GitMo Folder", command=self.show_gitmo_screen)
         file_menu.add_command(label="View GitHub", command=self._open_github_profile)
         file_menu.add_separator()
         file_menu.add_command(label="Run in Background", command=self._run_in_background)
@@ -1350,7 +1351,6 @@ class GitMoApp:
         self.remote_repos_error = ""
         self.refresh_repos_screen_after_load = False
         self.repo_catalog = []
-        self.manual_folder_paths = {}
         self.pending_added_folder_names.clear()
         self.repo_rows = {}
         self.status_vars = {}
@@ -1426,8 +1426,6 @@ class GitMoApp:
         self._discard_page(self.current_screen)
         if self.current_screen == "login":
             self.show_login_screen()
-        elif self.current_screen == "gitmo":
-            self.show_gitmo_screen()
         elif self.current_screen == "repos":
             self.show_repo_selection_screen()
         elif self.current_screen == "dashboard":
@@ -1436,9 +1434,6 @@ class GitMoApp:
     def _open_repo_manager(self) -> None:
         if not self.config.github_token:
             self.show_login_screen()
-            return
-        if not self.config.gitmo_path:
-            self.show_gitmo_screen()
             return
         self.show_repo_selection_screen()
 
@@ -1672,43 +1667,9 @@ class GitMoApp:
             self.refresh_repos_screen_after_load = False
             self.remote_repos = self._cached_remote_repos()
             self._start_remote_repo_load()
-            self.show_gitmo_screen()
-
-        self._button(self.content, "Continue", submit, variant="primary").pack(anchor="w", pady=(18, 0))
-
-    def show_gitmo_screen(self) -> None:
-        self.current_screen = "gitmo"
-        self._show_window()
-        self._prepare_page("gitmo", reuse=False)
-        self._page_header(
-            "Choose GitMo Folder",
-            "Track direct children of the GitMo folder or folders anywhere on disk.",
-        )
-
-        path_var = tk.StringVar(value=self.config.gitmo_path or str(Path.home() / "GitMo"))
-        row = ttk.Frame(self.content)
-        row.pack(fill="x")
-        ttk.Entry(row, textvariable=path_var, width=72).pack(side="left", fill="x", expand=True)
-
-        def browse() -> None:
-            selected = self._choose_folder(
-                title="Select GitMo folder",
-                initial_path=Path(path_var.get() or str(Path.home())),
-                must_exist=False,
-            )
-            if selected:
-                path_var.set(str(selected))
-
-        self._button(row, "Browse", browse, width=96).pack(side="left", padx=(10, 0))
-
-        def submit() -> None:
-            selected_path = Path(path_var.get()).expanduser()
-            selected_path.mkdir(parents=True, exist_ok=True)
-            self.config.gitmo_path = str(selected_path)
-            save_config(self.config)
             self.show_repo_selection_screen()
 
-        self._button(self.content, "Load Repos", submit, variant="primary").pack(anchor="w", pady=(18, 0))
+        self._button(self.content, "Continue", submit, variant="primary").pack(anchor="w", pady=(18, 0))
 
     def show_repo_selection_screen(self) -> None:
         self.current_screen = "repos"
@@ -1823,7 +1784,7 @@ class GitMoApp:
                 "commit_message_mode": LocalValue(
                     saved_config.commit_message_mode if saved_config else "summary"
                 ),
-                "local_path": LocalValue(str(selection.local_path)),
+                "local_path": LocalValue(str(selection.local_path) if selection.local_path else ""),
             }
 
         def current_repo_settings(repo_name: str) -> tuple[bool, bool, bool, str, str, str, str]:
@@ -1890,8 +1851,7 @@ class GitMoApp:
             row["enabled"].set(bool(row["github"].get()) and bool(row["local"].get()))
 
         def is_outside_local_folder(selection: RepoSelection, row_vars: dict[str, LocalValue]) -> bool:
-            local_path = Path(str(row_vars["local_path"].get())).expanduser()
-            return not self._is_inside_gitmo_folder(local_path)
+            return bool(str(row_vars["local_path"].get()))
 
         def remove_outside_folder(selection: RepoSelection, dialog: tk.Toplevel) -> None:
             row_vars = self.repo_rows[selection.name]
@@ -1907,7 +1867,6 @@ class GitMoApp:
                 return
 
             self.config.repos.pop(selection.name, None)
-            self.manual_folder_paths.pop(selection.name, None)
             save_config(self.config)
             self.repo_catalog = [
                 item
@@ -1917,11 +1876,10 @@ class GitMoApp:
             if not selection.exists_remote:
                 self.repo_rows.pop(selection.name, None)
             elif selection.name in self.repo_rows:
-                fallback_path = Path(self.config.gitmo_path).expanduser() / selection.name
                 self.repo_catalog = [
                     RepoSelection(
                         name=item.name,
-                        local_path=fallback_path,
+                        local_path=None,
                         exists_local=False,
                         exists_remote=True,
                         local_is_repo=False,
@@ -1934,7 +1892,7 @@ class GitMoApp:
                 ]
                 self.repo_rows[selection.name]["selected"].set(False)
                 self.repo_rows[selection.name]["local"].set(False)
-                self.repo_rows[selection.name]["local_path"].set(str(fallback_path))
+                self.repo_rows[selection.name]["local_path"].set("")
             dialog.destroy()
             populate_tree()
             update_delete_buttons()
@@ -2116,7 +2074,7 @@ class GitMoApp:
             return [
                 item
                 for item in self.repo_catalog
-                if not query or query in item.name.lower() or query in str(item.local_path).lower()
+                if not query or query in item.name.lower() or query in str(item.local_path or "").lower()
             ]
 
         def set_all_visible() -> None:
@@ -2192,6 +2150,11 @@ class GitMoApp:
             elif column == "#3":
                 toggle_target(row, "github")
             elif column == "#4":
+                if not bool(row["local"].get()) and not str(row["local_path"].get()):
+                    clone_path = self._choose_clone_destination(repo_name)
+                    if clone_path is None:
+                        return "break"
+                    row["local_path"].set(str(clone_path))
                 toggle_target(row, "local")
             else:
                 return None
@@ -2500,12 +2463,6 @@ class GitMoApp:
         self.is_paused = False
         self.sync_engine.start()
 
-    def _open_gitmo_folder(self) -> None:
-        if not self.config.gitmo_path:
-            self.show_gitmo_screen()
-            return
-        self._open_local_path(Path(self.config.gitmo_path).expanduser())
-
     def _open_local_path(self, path: Path) -> None:
         try:
             subprocess.Popen(["xdg-open", str(path)])
@@ -2625,14 +2582,9 @@ class GitMoApp:
             mode_text = "Two-way" if "two-way" in modes else "One-way"
         else:
             mode_text = "Mixed mode"
-        folder = (
-            self._shorten_path(Path(self.config.gitmo_path).expanduser())
-            if self.config.gitmo_path
-            else "Not selected"
-        )
         self.dashboard_watch_var.set("Watching" if self.sync_should_run else "Paused")
         self.dashboard_summary_var.set(
-            f"{len(enabled_repos)} repos | {mode_text} | {folder}\n"
+            f"{len(enabled_repos)} repos | {mode_text}\n"
             f"{self.header_last_sync_var.get()} | {self.header_git_var.get()}"
         )
 
@@ -2703,30 +2655,20 @@ class GitMoApp:
 
     def _build_repo_catalog(self, remote_repos: list[GitHubRepo]) -> list[RepoSelection]:
         remote_map = {repo.name: repo for repo in remote_repos}
-        gitmo_path = Path(self.config.gitmo_path).expanduser()
-        local_map: dict[str, Path] = {}
-
-        if gitmo_path.exists():
-            for child in gitmo_path.iterdir():
-                if child.is_dir() and not child.name.startswith("."):
-                    local_map.setdefault(child.name, child)
+        local_map: dict[str, Path | None] = {}
 
         for repo_name, repo_config in self.config.repos.items():
-            local_path = self.sync_engine.repo_path_for(repo_name, repo_config)
             # Keep configured names visible while GitHub repos are still loading.
             # Many GitHub-only rows have no local folder, so filtering only by
             # local existence makes them seem to disappear until the API returns.
-            local_map[repo_name] = local_path
-
-        for repo_name, local_path in self.manual_folder_paths.items():
-            local_map[repo_name] = local_path
+            local_map[repo_name] = self.sync_engine.repo_path_for(repo_name, repo_config)
 
         names = set(remote_map) | set(local_map)
         catalog: list[RepoSelection] = []
         for name in names:
-            local_path = local_map.get(name, gitmo_path / name)
+            local_path = local_map.get(name)
             remote_repo = remote_map.get(name)
-            exists_local = local_path.exists()
+            exists_local = local_path is not None and local_path.exists()
             exists_remote = remote_repo is not None
             saved_config = self.config.repos.get(name)
             if (
@@ -2744,9 +2686,7 @@ class GitMoApp:
                     exists_local=exists_local,
                     exists_remote=exists_remote,
                     local_is_repo=self._is_git_repo_fast(local_path) if exists_local else False,
-                    source="tracked"
-                    if name in self.config.repos
-                    else ("gitmo" if self._is_inside_gitmo_folder(local_path) else "remote"),
+                    source="tracked" if name in self.config.repos else "remote",
                     clone_url=remote_repo.clone_url if remote_repo else None,
                 )
             )
@@ -2755,21 +2695,60 @@ class GitMoApp:
     def _is_git_repo_fast(self, path: Path) -> bool:
         return (path / ".git").exists()
 
-    def _is_inside_gitmo_folder(self, path: Path) -> bool:
-        if not self.config.gitmo_path:
-            return False
-        gitmo_path = Path(self.config.gitmo_path).expanduser()
-        try:
-            return path.expanduser().resolve().is_relative_to(gitmo_path.resolve())
-        except (OSError, ValueError):
-            try:
-                return path.expanduser().resolve().parent == gitmo_path.resolve()
-            except OSError:
-                return path.expanduser().parent == gitmo_path
+    def _choose_clone_destination(self, repo_name: str) -> Path | None:
+        """Ask where a GitHub-only repo should be downloaded to."""
+        parent = self._choose_folder(
+            title=f"Choose where to download '{repo_name}'",
+            initial_path=Path.home(),
+            must_exist=True,
+        )
+        if not parent:
+            return None
+        target = parent.expanduser() / repo_name
+        if target.exists() and (not target.is_dir() or any(target.iterdir())):
+            messagebox.showerror(
+                "GitMo",
+                f"'{target}' already exists and is not empty.\n\n"
+                "Pick a different location, or use Add Local Folder to link that folder instead.",
+            )
+            return None
+        return target
+
+    def _ask_repo_name(self, local_path: Path) -> str | None:
+        """Ask which GitHub repo name a folder should sync to, defaulting to the folder name."""
+        suggestion = re.sub(r"[^A-Za-z0-9._-]+", "-", local_path.name).strip("-") or "project"
+        while True:
+            name = simpledialog.askstring(
+                "GitMo",
+                f"GitHub repository name for:\n{local_path}\n\n"
+                "An existing repo with this name will be linked; otherwise a new one is created.",
+                initialvalue=suggestion,
+                parent=self.root,
+            )
+            if name is None:
+                return None
+            name = name.strip()
+            suggestion = name or suggestion
+            if not GITHUB_REPO_NAME_PATTERN.fullmatch(name) or name in {".", ".."}:
+                messagebox.showerror(
+                    "GitMo",
+                    "Repository names can only use letters, numbers, '.', '-' and '_'.",
+                )
+                continue
+            existing = self.config.repos.get(name)
+            existing_path = self.sync_engine.repo_path_for(name, existing) if existing else None
+            if existing_path is not None and existing_path.resolve() != local_path.resolve():
+                messagebox.showerror(
+                    "GitMo",
+                    f"The repo name '{name}' is already used by:\n{existing_path}\n\n"
+                    "Choose a different name.",
+                )
+                continue
+            return name
 
     def _add_outside_folder_selection(self) -> None:
         selected = self._choose_folder(
-            title="Select outside folder to sync",
+            title="Select a folder to sync",
             initial_path=Path.home(),
             must_exist=True,
         )
@@ -2777,18 +2756,26 @@ class GitMoApp:
             return
 
         local_path = selected.expanduser()
-        repo_name = local_path.name
-
-        existing = next((item for item in self.repo_catalog if item.name == repo_name), None)
-        if existing and existing.local_path != local_path and (existing.exists_local or existing.name in self.config.repos):
-            messagebox.showerror(
-                "GitMo",
-                f"A repo named '{repo_name}' is already tracked at {existing.local_path}.\n"
-                "GitMo currently requires one unique local folder per GitHub repo name.",
-            )
+        if not self._safe_to_delete_local_folder(local_path):
+            messagebox.showerror("GitMo", f"GitMo cannot sync this folder:\n{local_path}")
+            return
+        tracked_name = next(
+            (
+                name
+                for name, repo in self.config.repos.items()
+                if repo.local_path and Path(repo.local_path).expanduser().resolve() == local_path.resolve()
+            ),
+            None,
+        )
+        if tracked_name:
+            messagebox.showinfo("GitMo", f"This folder is already synced as '{tracked_name}'.")
             return
 
-        self.manual_folder_paths[repo_name] = local_path
+        repo_name = self._ask_repo_name(local_path)
+        if not repo_name:
+            return
+
+        existing = next((item for item in self.repo_catalog if item.name == repo_name), None)
         self.pending_added_folder_names.add(repo_name)
         existing_config = self.config.repos.get(repo_name)
         self.config.repos[repo_name] = RepoConfig(
@@ -2922,13 +2909,10 @@ class GitMoApp:
         try:
             resolved = path.resolve()
             home = Path.home().resolve()
-            gitmo_path = Path(self.config.gitmo_path).expanduser().resolve() if self.config.gitmo_path else None
         except OSError:
             return False
 
         blocked_paths = {home, Path("/").resolve()}
-        if gitmo_path:
-            blocked_paths.add(gitmo_path)
         return resolved.exists() and resolved.is_dir() and resolved not in blocked_paths
 
     def _save_repo_rows_to_config(self) -> None:
@@ -2939,10 +2923,10 @@ class GitMoApp:
                 continue
             if self._row_has_no_targets(row):
                 continue
-            repo_path = Path(str(row["local_path"].get())).expanduser()
+            local_path_text = str(row["local_path"].get())
             updated_repos[selection.name] = RepoConfig(
                 name=selection.name,
-                local_path=str(repo_path),
+                local_path=str(Path(local_path_text).expanduser()) if local_path_text else "",
                 sync_mode=str(row["sync_mode"].get()),
                 enabled=self._row_sync_enabled(row),
                 sync_schedule=str(row["sync_schedule"].get()),
@@ -3047,7 +3031,10 @@ class GitMoApp:
                 wants_local = bool(row["local"].get())
                 enabled = bool(row["enabled"].get())
                 sync_mode = str(row["sync_mode"].get())
-                repo_path = Path(str(row["local_path"].get())).expanduser()
+                local_path_text = str(row["local_path"].get())
+                repo_path = Path(local_path_text).expanduser()
+                if wants_local and not local_path_text:
+                    raise GitCommandError(f"Choose a local folder for '{selection.name}' first.")
                 targets_changed = repo_targets_changed(
                     selection,
                     wants_github=wants_github,
@@ -3057,7 +3044,7 @@ class GitMoApp:
                 if not self._row_has_no_targets(row):
                     updated_repos[selection.name] = RepoConfig(
                         name=selection.name,
-                        local_path=str(repo_path),
+                        local_path=str(repo_path) if local_path_text else "",
                         sync_mode=sync_mode,
                         enabled=enabled,
                         sync_schedule=str(row["sync_schedule"].get()),
@@ -3123,11 +3110,6 @@ class GitMoApp:
                         self._connect_non_repo_folder_to_existing_remote(repo_path, remote_repo)
 
             self.config.repos = updated_repos
-            self.manual_folder_paths = {
-                repo_name: Path(repo.local_path).expanduser()
-                for repo_name, repo in self.config.repos.items()
-                if repo.local_path and not self._is_inside_gitmo_folder(Path(repo.local_path))
-            }
             self.pending_added_folder_names.clear()
             save_config(self.config)
         except (GitHubAPIError, GitCommandError) as exc:
@@ -3194,7 +3176,9 @@ class GitMoApp:
             self.config.github_email or "gitmo@users.noreply.github.com",
         )
 
-    def _shorten_path(self, path: Path) -> str:
+    def _shorten_path(self, path: Path | None) -> str:
+        if path is None:
+            return ""
         text = str(path)
         home = str(Path.home())
         if text.startswith(home):

@@ -24,8 +24,8 @@ replacement for a full Git client or a team merge workflow.
 
 ## Features
 
-- Choose one main GitMo folder whose direct child folders become repo candidates
-- Add folders from elsewhere on the computer without moving them
+- Sync any folder on the computer, wherever it lives, without moving it
+- Choose the GitHub repository name when adding a folder (defaults to the folder name)
 - Load repositories from the authenticated GitHub account
 - Reopen Manage Repositories quickly from the saved GitHub repo list while refreshing online data in the background
 - Match local folders and GitHub repositories by name
@@ -163,11 +163,10 @@ Setup:
 
 1. Start GitMo.
 2. Enter a GitHub personal access token.
-3. Choose or create the main GitMo folder.
-4. Open Manage Repositories.
-5. Set the GitHub and Local Folder targets for each project.
-6. Click a repository name if its sync mode needs changing.
-7. Click `Apply Selection`.
+3. In Manage Repositories, click `Add Local Folder` for each folder to sync,
+   or enable Local Folder on a GitHub repository to download it.
+4. Click a repository name if its sync mode needs changing.
+5. Click `Apply Selection`.
 
 GitHub repositories are loaded in a background thread, allowing the interface
 to open from saved and local state before the network request completes.
@@ -176,15 +175,11 @@ to open from saved and local state before the network request completes.
 
 ### Upload a Local Folder
 
-For a direct child of the GitMo folder, open Manage Repositories and enable both
-GitHub and Local Folder.
-
-For a folder elsewhere on disk:
-
 1. Click `Add Local Folder`.
-2. Choose the existing folder.
-3. Keep GitHub and Local Folder enabled.
-4. Click `Apply Selection`.
+2. Choose the folder. It can be anywhere on disk.
+3. Confirm or change the GitHub repository name. It defaults to the folder name.
+4. Keep GitHub and Local Folder enabled.
+5. Click `Apply Selection`.
 
 If no matching GitHub repository exists, GitMo creates a public repository and
 uses the first readable README sentence as its GitHub description. It then
@@ -197,12 +192,13 @@ pushes the contents.
 
 ### Clone a GitHub Repository
 
-For a GitHub-only row, enable Local Folder and click `Apply Selection`. GitMo
-clones it into the configured local path and sets the local Git identity.
+For a GitHub-only row, enable Local Folder. GitMo asks which folder to download
+it into, then clones it to `<chosen folder>/<repo name>` when you click
+`Apply Selection`, and sets the local Git identity.
 
 ### Same Name on Both Sides
 
-GitMo matches projects by repository or folder name.
+When an added folder is given the name of an existing GitHub repository:
 
 - If the local folder is already a standalone Git repository, GitMo connects
   its `origin` to the matching GitHub repository.
@@ -225,7 +221,7 @@ Apply Selection also asks for confirmation if the selected target changes would
 delete existing local or GitHub data.
 
 The File menu's `Delete all settings and restart` removes the saved token,
-selected GitMo folder, repository configuration, UI settings, and autostart
+repository configuration, UI settings, and autostart
 entry. It does not delete local folders or GitHub repositories.
 
 ## Run From Source

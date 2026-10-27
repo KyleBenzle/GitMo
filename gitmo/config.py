@@ -3,7 +3,7 @@ from __future__ import annotations
 """Read and write GitMo's user settings.
 
 The config file lives outside the project so installed copies and source-tree
-copies share the same saved token, GitMo folder, and selected repos.
+copies share the same saved token and selected repos.
 """
 
 import json
@@ -42,7 +42,6 @@ class AppConfig:
     github_token: str = ""
     github_login: str = ""
     github_email: str = ""
-    gitmo_path: str = ""
     font_size_delta: int = 0
     repos: dict[str, RepoConfig] = field(default_factory=dict)
     cached_github_login: str = ""
@@ -54,6 +53,13 @@ class AppConfig:
             name: RepoConfig(**repo_data)
             for name, repo_data in data.get("repos", {}).items()
         }
+        # Older versions kept every repo under one shared "GitMo folder" and
+        # could leave local_path empty. Pin those repos to their real folder.
+        legacy_root = data.get("gitmo_path", "")
+        if legacy_root:
+            for name, repo_config in repos.items():
+                if not repo_config.local_path:
+                    repo_config.local_path = str(Path(legacy_root).expanduser() / name)
         cached_github_repos = {
             name: CachedGitHubRepo(**repo_data)
             for name, repo_data in data.get("cached_github_repos", {}).items()
@@ -62,7 +68,6 @@ class AppConfig:
             github_token=data.get("github_token", ""),
             github_login=data.get("github_login", ""),
             github_email=data.get("github_email", ""),
-            gitmo_path=data.get("gitmo_path", ""),
             font_size_delta=int(data.get("font_size_delta", 0)),
             repos=repos,
             cached_github_login=data.get("cached_github_login", ""),

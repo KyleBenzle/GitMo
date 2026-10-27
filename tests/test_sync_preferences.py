@@ -32,6 +32,30 @@ class ConfigCompatibilityTests(unittest.TestCase):
         self.assertEqual(repo.sync_schedule, "idle-1m")
         self.assertEqual(repo.commit_message_mode, "summary")
 
+    def test_legacy_gitmo_folder_is_pinned_onto_repos(self) -> None:
+        config = AppConfig.from_dict(
+            {
+                "gitmo_path": "/tmp/GitMo",
+                "repos": {
+                    "Inside": {"name": "Inside", "local_path": ""},
+                    "Elsewhere": {"name": "Elsewhere", "local_path": "/srv/Elsewhere"},
+                },
+            }
+        )
+
+        self.assertEqual(config.repos["Inside"].local_path, "/tmp/GitMo/Inside")
+        self.assertEqual(config.repos["Elsewhere"].local_path, "/srv/Elsewhere")
+        self.assertNotIn("gitmo_path", config.to_dict())
+
+    def test_repo_without_local_folder_has_no_path(self) -> None:
+        engine = SyncEngine(AppConfig(), lambda *_args: None)
+
+        self.assertIsNone(engine.repo_path_for("Remote", RepoConfig("Remote")))
+        self.assertEqual(
+            engine.repo_path_for("Local", RepoConfig("Local", local_path="/srv/Local")),
+            Path("/srv/Local"),
+        )
+
 
 class SyncScheduleTests(unittest.TestCase):
     def setUp(self) -> None:
