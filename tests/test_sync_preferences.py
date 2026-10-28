@@ -1,10 +1,12 @@
 from datetime import datetime
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
 from gitmo.config import AppConfig, RepoConfig
+from gitmo.git_cli import working_tree_status
 from gitmo.sync_engine import (
     RepoStatus,
     SyncEngine,
@@ -101,6 +103,24 @@ class CommitMessageTests(unittest.TestCase):
 
     def test_standard_message_uses_existing_text(self) -> None:
         self.assertEqual(commit_message_for("standard", " M app.py"), "GitMo autosave")
+
+    def test_real_git_status_keeps_first_path_intact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+            }
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / "README.md").write_text("one", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, env=env)
+            (repo / "README.md").write_text("two", encoding="utf-8")
+
+            message = commit_message_for("summary", working_tree_status(repo))
+
+        self.assertEqual(message, "GitMo: update 1 file (README.md)")
 
 
 class WorkingTreeFingerprintTests(unittest.TestCase):

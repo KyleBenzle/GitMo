@@ -25,6 +25,7 @@ from gitmo.git_cli import (
     has_commits,
     has_staged_or_unstaged_changes,
     init_repo,
+    is_auth_error,
     is_git_repo,
     pull_ff_only,
     push,
@@ -37,6 +38,7 @@ from gitmo.git_cli import (
 
 
 AUTOSAVE_MESSAGE = "GitMo autosave"
+AUTH_STATUS_DETAIL = "GitHub rejected the saved token. Open File > GitHub Account to update it."
 POLL_INTERVAL_SECONDS = 10
 SCHEDULE_DELAYS = {
     "idle-1m": 60,
@@ -64,6 +66,8 @@ class SyncEngine:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        # Serializes passes so a manual sync never races the background loop.
+        self._run_lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -94,6 +98,10 @@ class SyncEngine:
             self._stop_event.wait(POLL_INTERVAL_SECONDS)
 
     def run_once(self, *, force_autosave: bool = False) -> None:
+        with self._run_lock:
+            self._run_pass(force_autosave=force_autosave)
+
+    def _run_pass(self, *, force_autosave: bool) -> None:
         for repo_name, repo_config in list(self.config.repos.items()):
             if self._stop_event.is_set():
                 break
@@ -116,7 +124,10 @@ class SyncEngine:
                     force_autosave=force_autosave,
                 )
             except GitCommandError as exc:
-                self._set_status(repo_name, "error", str(exc))
+                if is_auth_error(str(exc)):
+                    self._set_status(repo_name, "auth", AUTH_STATUS_DETAIL)
+                else:
+                    self._set_status(repo_name, "error", str(exc))
             except Exception as exc:  # pragma: no cover
                 self._set_status(repo_name, "error", f"Unexpected error: {exc}")
 

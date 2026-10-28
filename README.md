@@ -171,6 +171,17 @@ Setup:
 GitHub repositories are loaded in a background thread, allowing the interface
 to open from saved and local state before the network request completes.
 
+### Change the GitHub Token
+
+GitHub tokens can expire or be revoked. Open `File > GitHub Account...` or the
+`GitHub Account` toolbar button to see who you are signed in as and whether the
+saved token still works. To replace it, click `Create a token on GitHub` (the
+`repo` and `delete_repo` permissions are pre-selected), generate the token on
+GitHub, paste it into the window, and click `Save`.
+
+If GitHub rejects the saved token while syncing, GitMo opens this window
+automatically and marks affected repositories as `Sign-in needed`.
+
 ## Common Workflows
 
 ### Upload a Local Folder

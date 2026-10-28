@@ -38,7 +38,7 @@ def git_auth_env(token: str = "") -> tuple[dict[str, str], Path | None]:
     return env, askpass_path
 
 
-def run_git(args: list[str], cwd: Path | None = None, token: str = "") -> str:
+def run_git(args: list[str], cwd: Path | None = None, token: str = "", strip: bool = True) -> str:
     command = ["git", *args]
     env, askpass_path = git_auth_env(token)
     try:
@@ -60,7 +60,18 @@ def run_git(args: list[str], cwd: Path | None = None, token: str = "") -> str:
         stdout = result.stdout.strip()
         details = stderr or stdout or "unknown git error"
         raise GitCommandError(f"{' '.join(command)} failed: {details}")
-    return result.stdout.strip()
+    return result.stdout.strip() if strip else result.stdout.rstrip("\n")
+
+
+AUTH_ERROR_MARKERS = (
+    "Authentication failed",
+    "Invalid username or token",
+    "could not read Username",
+)
+
+
+def is_auth_error(message: str) -> bool:
+    return any(marker in message for marker in AUTH_ERROR_MARKERS)
 
 
 def is_git_repo(path: Path) -> bool:
@@ -137,7 +148,8 @@ def has_staged_or_unstaged_changes(path: Path) -> bool:
 
 
 def working_tree_status(path: Path) -> str:
-    return run_git(["status", "--porcelain"], cwd=path)
+    # Leading spaces are part of the porcelain status code, so keep them.
+    return run_git(["status", "--porcelain"], cwd=path, strip=False)
 
 
 def commit(path: Path, message: str) -> bool:

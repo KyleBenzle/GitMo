@@ -20,6 +20,10 @@ class GitHubAPIError(RuntimeError):
     pass
 
 
+class GitHubAuthError(GitHubAPIError):
+    """GitHub rejected the token (expired, revoked, or mistyped)."""
+
+
 @dataclass
 class GitHubRepo:
     name: str
@@ -64,7 +68,15 @@ class GitHubClient:
                 return json.loads(body) if body else {}
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise GitHubAPIError(f"GitHub API error {exc.code}: {body}") from exc
+            try:
+                message = json.loads(body).get("message") or body
+            except (ValueError, AttributeError):
+                message = body
+            if exc.code == 401:
+                raise GitHubAuthError(
+                    "GitHub rejected the token. It may have expired or been revoked."
+                ) from exc
+            raise GitHubAPIError(f"GitHub API error {exc.code}: {message}") from exc
         except urllib.error.URLError as exc:
             raise GitHubAPIError(f"GitHub API request failed: {exc.reason}") from exc
 

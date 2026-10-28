@@ -26,7 +26,7 @@ from gitmo.config import (
     load_config,
     save_config,
 )
-from gitmo.github_api import GitHubAPIError, GitHubClient, GitHubRepo
+from gitmo.github_api import GitHubAPIError, GitHubAuthError, GitHubClient, GitHubRepo
 from gitmo.git_cli import (
     GitCommandError,
     clone_repo,
@@ -87,6 +87,8 @@ THEME = {
 }
 
 
+# Opens GitHub's "new classic token" page with the scopes GitMo needs pre-ticked.
+TOKEN_CREATE_URL = "https://github.com/settings/tokens/new?scopes=repo,delete_repo&description=GitMo"
 GITHUB_REPO_NAME_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,100}")
 
 
@@ -649,7 +651,9 @@ class GitMoApp:
         self.remote_repos_loading = False
         self.remote_repos_error = ""
         self.refresh_repos_screen_after_load = False
-        self.remote_repos_queue: queue.Queue[tuple[list[GitHubRepo], str, bool]] = queue.Queue()
+        self.remote_repos_queue: queue.Queue[tuple[list[GitHubRepo], str, bool, bool]] = queue.Queue()
+        self.auth_prompt_shown = False
+        self.account_dialog: tk.Toplevel | None = None
         self.tray_command_queue: queue.Queue[str] = queue.Queue()
         self.tray_action_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.tray_thread_started = False
@@ -657,6 +661,7 @@ class GitMoApp:
         self.repo_catalog: list[RepoSelection] = []
         self.pending_added_folder_names: set[str] = set()
         self.log_lock = threading.Lock()
+        self.manual_sync_running = False
         self.sync_engine = SyncEngine(self.config, self._enqueue_log)
         self.logo_image: tk.PhotoImage | None = None
         self.header_logo_image: tk.PhotoImage | None = None
@@ -956,6 +961,8 @@ class GitMoApp:
         menu_bar = tk.Menu(self.root)
 
         file_menu = tk.Menu(menu_bar, tearoff=False)
+        file_menu.add_command(label="GitHub Account...", command=self.show_github_account_dialog)
+        file_menu.add_separator()
         file_menu.add_command(label="Run Sync Now", accelerator="Ctrl+R", command=self._manual_sync)
         file_menu.add_command(label="View Logs", command=self._view_logs)
         file_menu.add_command(label="Manage Repos", command=self._open_repo_manager)
@@ -1502,21 +1509,24 @@ class GitMoApp:
             try:
                 repos = client.list_repos()
             except GitHubAPIError as exc:
-                self.remote_repos_queue.put(([], str(exc), refresh_repos_screen))
+                auth_failed = isinstance(exc, GitHubAuthError)
+                self.remote_repos_queue.put(([], str(exc), refresh_repos_screen, auth_failed))
                 return
-            self.remote_repos_queue.put((repos, "", refresh_repos_screen))
+            self.remote_repos_queue.put((repos, "", refresh_repos_screen, False))
 
         threading.Thread(target=load, daemon=True).start()
         self.root.after(100, self._poll_remote_repo_load)
 
     def _poll_remote_repo_load(self) -> None:
         try:
-            remote_repos, error, refresh_repos_screen = self.remote_repos_queue.get_nowait()
+            remote_repos, error, refresh_repos_screen, auth_failed = self.remote_repos_queue.get_nowait()
         except queue.Empty:
             if self.remote_repos_loading and self.root.winfo_exists():
                 self.root.after(100, self._poll_remote_repo_load)
             return
         self._finish_remote_repo_load(remote_repos, error, refresh_repos_screen)
+        if auth_failed:
+            self._prompt_for_new_token()
 
     def _finish_remote_repo_load(
         self,
@@ -1611,6 +1621,13 @@ class GitMoApp:
             "Run in Background",
             self._run_in_background,
         ).pack(side="left")
+        self._ribbon_separator(toolbar)
+        self._ribbon_button(
+            toolbar,
+            "🔑",
+            "GitHub Account",
+            self.show_github_account_dialog,
+        ).pack(side="left")
 
     def show_login_screen(self) -> None:
         self.current_screen = "login"
@@ -1625,8 +1642,19 @@ class GitMoApp:
         )
         ttk.Label(
             self.content,
-            text="Enter a GitHub personal access token with repo access.",
+            text=(
+                "GitMo signs in to GitHub with a personal access token.\n"
+                "1. Click 'Create a token on GitHub' (the needed permissions are pre-selected).\n"
+                "2. On GitHub, click 'Generate token' and copy it.\n"
+                "3. Paste it below and click Continue."
+            ),
             style="Subtitle.TLabel",
+            justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+        self._button(
+            self.content,
+            "Create a token on GitHub",
+            lambda: webbrowser.open(TOKEN_CREATE_URL),
         ).pack(anchor="w", pady=(0, 12))
 
         token_var = tk.StringVar(value=self.config.github_token)
@@ -1638,38 +1666,171 @@ class GitMoApp:
         )
 
         def submit() -> None:
-            token = token_var.get().strip()
-            if not token:
-                status_var.set("Token is required.")
+            error = self._apply_github_token(token_var.get())
+            if error:
+                status_var.set(error)
                 return
-            client = GitHubClient(token)
-            try:
-                user = client.get_authenticated_user()
-            except GitHubAPIError as exc:
-                status_var.set(str(exc))
-                return
-            self.github_client = client
-            self.config.github_token = token
-            self.config.github_login = user.get("login", "")
-            self.config.github_email = user.get("email") or (
-                f"{self.config.github_login}@users.noreply.github.com"
-                if self.config.github_login
-                else "gitmo@users.noreply.github.com"
-            )
-            if self.config.cached_github_login != self.config.github_login:
-                self.config.cached_github_login = ""
-                self.config.cached_github_repos = {}
-            save_config(self.config)
-            self._enqueue_log("app", f"Authenticated as {self.config.github_login or 'unknown'}.")
-            self.remote_repos_loaded = False
-            self.remote_repos_loading = False
-            self.remote_repos_error = ""
-            self.refresh_repos_screen_after_load = False
-            self.remote_repos = self._cached_remote_repos()
-            self._start_remote_repo_load()
             self.show_repo_selection_screen()
 
         self._button(self.content, "Continue", submit, variant="primary").pack(anchor="w", pady=(18, 0))
+
+    def _apply_github_token(self, raw_token: str) -> str | None:
+        """Verify and save a token. Returns an error message, or None on success."""
+        token = raw_token.strip()
+        if not token:
+            return "Paste a token first."
+        client = GitHubClient(token)
+        try:
+            user = client.get_authenticated_user()
+        except GitHubAuthError:
+            return "GitHub did not accept this token. Check that it was copied completely."
+        except GitHubAPIError as exc:
+            return str(exc)
+        self.github_client = client
+        self.config.github_token = token
+        self.config.github_login = user.get("login", "")
+        self.config.github_email = user.get("email") or (
+            f"{self.config.github_login}@users.noreply.github.com"
+            if self.config.github_login
+            else "gitmo@users.noreply.github.com"
+        )
+        if self.config.cached_github_login != self.config.github_login:
+            self.config.cached_github_login = ""
+            self.config.cached_github_repos = {}
+        save_config(self.config)
+        self._enqueue_log("app", f"Authenticated as {self.config.github_login or 'unknown'}.")
+        self.auth_prompt_shown = False
+        self.remote_repos_loaded = False
+        self.remote_repos_loading = False
+        self.remote_repos_error = ""
+        self.refresh_repos_screen_after_load = False
+        self.remote_repos = self._cached_remote_repos()
+        self._start_remote_repo_load()
+        return None
+
+    def _prompt_for_new_token(self) -> None:
+        """Open the account window once per session when GitHub rejects the token."""
+        if self.auth_prompt_shown or not self.config.github_token:
+            return
+        self.auth_prompt_shown = True
+        self.show_github_account_dialog(
+            reason="GitHub rejected your saved token, so syncing has stopped working. "
+            "Create a new token and paste it below."
+        )
+
+    def show_github_account_dialog(self, reason: str = "") -> None:
+        if self.account_dialog is not None and self.account_dialog.winfo_exists():
+            self.account_dialog.lift()
+            self.account_dialog.focus_force()
+            return
+        self._show_window()
+        font_delta = self.config.font_size_delta
+        body_font = (FONT_FAMILY, BASE_BODY_SIZE + font_delta)
+        bold_font = (FONT_FAMILY, BASE_BODY_SIZE + font_delta, "bold")
+
+        dialog = tk.Toplevel(self.root)
+        self.account_dialog = dialog
+        dialog.title("GitHub Account")
+        dialog.configure(bg=THEME["bg"])
+        dialog.minsize(560, 0)
+        dialog.transient(self.root)
+
+        body = tk.Frame(dialog, bg=THEME["bg"], padx=20, pady=18)
+        body.pack(fill="both", expand=True)
+
+        def label(text: str, *, font=body_font, fg: str = THEME["text"], pady=(0, 0)) -> tk.Label:
+            widget = tk.Label(
+                body, text=text, bg=THEME["bg"], fg=fg, font=font,
+                anchor="w", justify="left", wraplength=520,
+            )
+            widget.pack(fill="x", pady=pady)
+            return widget
+
+        label("GitHub Account", font=(FONT_FAMILY, BASE_BODY_SIZE + font_delta + 4, "bold"), pady=(0, 10))
+        if reason:
+            label(reason, fg=THEME["danger"], pady=(0, 10))
+
+        signed_in = self.config.github_login or "Not signed in"
+        label(f"Signed in as: {signed_in}", font=bold_font)
+        token_status = label("Checking saved token..." if self.config.github_token else "No token saved.",
+                             fg=THEME["muted"], pady=(2, 14))
+
+        ttk.Separator(body).pack(fill="x", pady=(0, 12))
+        label("Change token", font=bold_font)
+        label(
+            "1. Click 'Create a token on GitHub'. The permissions GitMo needs are already selected.\n"
+            "2. On GitHub, click 'Generate token' and copy it.\n"
+            "3. Paste it here and click Save.",
+            fg=THEME["muted"],
+            pady=(2, 8),
+        )
+        self._button(body, "Create a token on GitHub", lambda: webbrowser.open(TOKEN_CREATE_URL)).pack(
+            anchor="w", pady=(0, 10)
+        )
+
+        token_var = tk.StringVar()
+        entry_row = tk.Frame(body, bg=THEME["bg"])
+        entry_row.pack(fill="x")
+        entry = ttk.Entry(entry_row, textvariable=token_var, show="*", width=56)
+        entry.pack(side="left", fill="x", expand=True)
+        show_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            entry_row,
+            text="Show",
+            variable=show_var,
+            command=lambda: entry.configure(show="" if show_var.get() else "*"),
+        ).pack(side="left", padx=(8, 0))
+
+        result_var = tk.StringVar(value="")
+        result_label = tk.Label(body, textvariable=result_var, bg=THEME["bg"], fg=THEME["danger"],
+                                font=body_font, anchor="w", justify="left", wraplength=520)
+        result_label.pack(fill="x", pady=(8, 0))
+
+        def save() -> None:
+            dialog.configure(cursor="watch")
+            dialog.update_idletasks()
+            error = self._apply_github_token(token_var.get())
+            dialog.configure(cursor="")
+            if error:
+                result_var.set(error)
+                return
+            dialog.destroy()
+            messagebox.showinfo("GitMo", f"Signed in as {self.config.github_login}. Syncing will resume.")
+            self._refresh_current_screen()
+
+        buttons = tk.Frame(body, bg=THEME["bg"])
+        buttons.pack(fill="x", pady=(14, 0))
+        self._button(buttons, "Save", save, variant="primary").pack(side="left")
+        self._button(buttons, "Close", dialog.destroy).pack(side="left", padx=(10, 0))
+        entry.bind("<Return>", lambda _event: save())
+        entry.focus_set()
+
+        # Check the saved token without freezing the window.
+        if self.config.github_token:
+            outcome: list[tuple[str, str]] = []
+            saved_token = self.config.github_token
+
+            def check() -> None:
+                try:
+                    GitHubClient(saved_token).get_authenticated_user()
+                    outcome.append(("✅ Saved token is working.", THEME["success"]))
+                except GitHubAuthError:
+                    outcome.append(("❌ Saved token was rejected by GitHub (expired or revoked). "
+                                    "Create a new one below.", THEME["danger"]))
+                except GitHubAPIError as exc:
+                    outcome.append((f"⚠ Could not check the token: {exc}", THEME["warning"]))
+
+            def poll() -> None:
+                if not dialog.winfo_exists():
+                    return
+                if not outcome:
+                    dialog.after(150, poll)
+                    return
+                text, color = outcome[0]
+                token_status.configure(text=text, fg=color)
+
+            threading.Thread(target=check, daemon=True).start()
+            dialog.after(150, poll)
 
     def show_repo_selection_screen(self) -> None:
         self.current_screen = "repos"
@@ -2639,6 +2800,10 @@ class GitMoApp:
             color = THEME["danger"]
             indicator = "🔴"
             label = "Error"
+        elif state == "auth":
+            color = THEME["danger"]
+            indicator = "🔴"
+            label = "Sign-in needed"
         else:
             color = THEME["sync"]
             indicator = "🔵"
@@ -3112,6 +3277,10 @@ class GitMoApp:
             self.config.repos = updated_repos
             self.pending_added_folder_names.clear()
             save_config(self.config)
+        except GitHubAuthError:
+            self.auth_prompt_shown = False
+            self._prompt_for_new_token()
+            return
         except (GitHubAPIError, GitCommandError) as exc:
             messagebox.showerror("GitMo", str(exc))
             return
@@ -3208,12 +3377,22 @@ class GitMoApp:
         return path.exists() and path.is_dir() and not any(path.iterdir())
 
     def _manual_sync(self) -> None:
-        try:
-            self.is_paused = False
-            self.sync_engine.run_once(force_autosave=True)
-            self._refresh_statuses()
-        except Exception as exc:  # pragma: no cover
-            messagebox.showerror("GitMo", str(exc))
+        # Network git commands can take a while; keep the window responsive.
+        if self.manual_sync_running:
+            return
+        self.manual_sync_running = True
+        self.is_paused = False
+        self._enqueue_log("app", "Manual sync started.")
+
+        def run() -> None:
+            try:
+                self.sync_engine.run_once(force_autosave=True)
+            except Exception as exc:  # pragma: no cover
+                self._enqueue_log("app", f"Manual sync failed: {exc}")
+            finally:
+                self.manual_sync_running = False
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _view_logs(self) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -3292,6 +3471,10 @@ class GitMoApp:
             self.last_checked_var.set(f"Last checked {datetime.now().strftime('%H:%M:%S')}")
             self._schedule_status_refresh(2000)
             return
+        if any(
+            self.sync_engine.status_for(name).state == "auth" for name in self.status_vars
+        ):
+            self.root.after_idle(self._prompt_for_new_token)
         for repo_name, status_var in self.status_vars.items():
             status = self.sync_engine.status_for(repo_name)
             text, color = self._status_text_and_color(status.state, status.detail)
